@@ -248,7 +248,9 @@
         <div id="downloadWrap" class="row hidden" style="margin-top: 16px">
           <a id="downloadLink" class="download" href="#">Download All (ZIP)</a>
           <a id="printReadyLink" class="download hidden" href="#">Download Print-Ready PDF</a>
+          <a id="duplexPrintLink" class="download hidden" href="#">Download Duplex Print PDF</a>
         </div>
+        <p id="duplexPrintNote" class="status hidden">Print double-sided, then cut horizontally = perfect ID cards</p>
         <div id="failedLoginsPanel" class="status hidden">
           <strong>Failed Logins</strong>
           <ul id="failedLoginsList" style="margin: 10px 0 0; padding-left: 20px"></ul>
@@ -280,6 +282,8 @@
       const downloadWrap = document.getElementById("downloadWrap");
       const downloadLink = document.getElementById("downloadLink");
       const printReadyLink = document.getElementById("printReadyLink");
+      const duplexPrintLink = document.getElementById("duplexPrintLink");
+      const duplexPrintNote = document.getElementById("duplexPrintNote");
       const failedLoginsPanel = document.getElementById("failedLoginsPanel");
       const failedLoginsList = document.getElementById("failedLoginsList");
       const runError = document.getElementById("runError");
@@ -433,6 +437,14 @@
           } else {
             printReadyLink.classList.add("hidden");
           }
+          if (job.duplexPrintUrl) {
+            duplexPrintLink.href = job.duplexPrintUrl;
+            duplexPrintLink.classList.remove("hidden");
+            duplexPrintNote.classList.remove("hidden");
+          } else {
+            duplexPrintLink.classList.add("hidden");
+            duplexPrintNote.classList.add("hidden");
+          }
           downloadWrap.classList.remove("hidden");
         }
 
@@ -468,6 +480,8 @@
         progressPanel.classList.add("hidden");
         downloadWrap.classList.add("hidden");
         printReadyLink.classList.add("hidden");
+        duplexPrintLink.classList.add("hidden");
+        duplexPrintNote.classList.add("hidden");
         failedLoginsPanel.classList.add("hidden");
         failedLoginsList.innerHTML = "";
         runError.classList.add("hidden");

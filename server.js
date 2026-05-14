@@ -24,6 +24,10 @@ const DEFAULT_CONCURRENCY = clampNumber(Number(process.env.CONCURRENCY || 8), 3,
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
 const COMMON_CARD_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".webp"];
 const PRINT_READY_FILE_NAME = "all-cards-print-ready.pdf";
+const DUPLEX_PRINT_FILE_NAME = "duplex-print-ready.pdf";
+const A4_WIDTH = 595;
+const A4_HEIGHT = 842;
+const A4_HALF_HEIGHT = A4_HEIGHT / 2;
 
 const uploads = new Map();
 const jobs = new Map();
@@ -137,6 +141,8 @@ app.post("/api/process", async (req, res) => {
     zipPath: path.join(ZIP_DIR, `${jobId}.zip`),
     printReadyPath: path.join(OUTPUT_DIR, PRINT_READY_FILE_NAME),
     printReadyUrl: null,
+    duplexPrintPath: path.join(OUTPUT_DIR, DUPLEX_PRINT_FILE_NAME),
+    duplexPrintUrl: null,
     outputPath: OUTPUT_DIR,
     failedPath: path.join(ZIP_DIR, `${jobId}-failed.txt`),
     progressPath: path.join(OUTPUT_DIR, "progress.json"),
@@ -183,6 +189,15 @@ app.get("/download/:jobId/print-ready", (req, res) => {
   }
 
   res.download(job.printReadyPath, PRINT_READY_FILE_NAME);
+});
+
+app.get("/download/:jobId/duplex-print", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job || job.status !== "completed" || !job.duplexPrintPath || !fs.existsSync(job.duplexPrintPath)) {
+    return res.status(404).send("Duplex print PDF is not ready yet.");
+  }
+
+  res.download(job.duplexPrintPath, DUPLEX_PRINT_FILE_NAME);
 });
 
 app.use((error, _req, res, _next) => {
@@ -338,7 +353,15 @@ async function runJob(job, meta, emailIndex, sharedPassword) {
   if (mergedPdfPath) {
     job.printReadyUrl = `/download/${job.id}/print-ready`;
   }
-  await zipFiles(mergedPdfPath ? [...job.outputFiles, mergedPdfPath] : job.outputFiles, job.failedPath, job.zipPath);
+  const duplexPdfPath = await createDuplexPrintPdf(job.outputFiles, job.duplexPrintPath);
+  if (duplexPdfPath) {
+    job.duplexPrintUrl = `/download/${job.id}/duplex-print`;
+  }
+  await zipFiles(
+    [...job.outputFiles, mergedPdfPath, duplexPdfPath].filter(Boolean),
+    job.failedPath,
+    job.zipPath
+  );
   job.status = "completed";
   job.message = `Completed ${job.total} members. ${job.alreadyDone} already done, ${job.success} downloaded, ${job.failed} failed.`;
   job.downloadUrl = `/download/${job.id}`;
@@ -550,6 +573,66 @@ async function mergePdfFiles(filePaths, destinationPath) {
   return destinationPath;
 }
 
+async function createDuplexPrintPdf(filePaths, destinationPath) {
+  const pdfPaths = [...new Set(filePaths)]
+    .filter((filePath) => filePath && path.extname(filePath).toLowerCase() === ".pdf")
+    .filter((filePath) => fs.existsSync(filePath))
+    .filter((filePath) => ![PRINT_READY_FILE_NAME, DUPLEX_PRINT_FILE_NAME].includes(path.basename(filePath)));
+
+  if (pdfPaths.length === 0) {
+    return null;
+  }
+
+  const duplexPdf = await PDFDocument.create();
+
+  for (let index = 0; index < pdfPaths.length; index += 2) {
+    const memberA = await readMemberCardPages(duplexPdf, pdfPaths[index]);
+    const memberB = pdfPaths[index + 1]
+      ? await readMemberCardPages(duplexPdf, pdfPaths[index + 1])
+      : null;
+
+    const frontPage = duplexPdf.addPage([A4_WIDTH, A4_HEIGHT]);
+    drawCardSlot(frontPage, memberA.front, "top");
+    if (memberB) {
+      drawCardSlot(frontPage, memberB.front, "bottom");
+    }
+
+    const backPage = duplexPdf.addPage([A4_WIDTH, A4_HEIGHT]);
+    if (memberA.back) {
+      drawCardSlot(backPage, memberA.back, "top");
+    }
+    if (memberB?.back) {
+      drawCardSlot(backPage, memberB.back, "bottom");
+    }
+  }
+
+  const duplexBytes = await duplexPdf.save();
+  await fsp.writeFile(destinationPath, duplexBytes);
+  return destinationPath;
+}
+
+async function readMemberCardPages(targetPdf, sourcePath) {
+  const sourceBytes = await fsp.readFile(sourcePath);
+  const sourcePdf = await PDFDocument.load(sourceBytes);
+  const pageIndices = sourcePdf.getPageIndices().slice(0, 2);
+  const [front, back] = await targetPdf.embedPdf(sourceBytes, pageIndices);
+
+  return { front, back };
+}
+
+function drawCardSlot(page, embeddedPage, slot) {
+  if (!embeddedPage) {
+    return;
+  }
+
+  page.drawPage(embeddedPage, {
+    x: 0,
+    y: slot === "top" ? A4_HALF_HEIGHT : 0,
+    width: A4_WIDTH,
+    height: A4_HALF_HEIGHT,
+  });
+}
+
 function getChromiumLaunchOptions() {
   const launchOptions = {
     headless: true,
@@ -628,6 +711,7 @@ async function saveProgress(job, force = false) {
     failedPath: job.failedPath,
     progressPath: job.progressPath,
     printReadyPath: job.printReadyPath,
+    duplexPrintPath: job.duplexPrintPath,
     updatedAt: new Date().toISOString(),
   };
 
@@ -658,6 +742,7 @@ function publicJob(job) {
     message: job.message,
     downloadUrl: job.downloadUrl,
     printReadyUrl: job.printReadyUrl,
+    duplexPrintUrl: job.duplexPrintUrl,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     error: job.error,
