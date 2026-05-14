@@ -118,7 +118,7 @@ app.post("/api/process", async (req, res) => {
     return res.status(400).json({ error: requestedConcurrency.error });
   }
 
-  const rangeTotal = range.endRow - range.startRow + 1;
+  const rangeTotal = Math.max(Math.min(range.endRow, meta.rowCount) - range.startRow + 1, 0);
   const jobId = crypto.randomUUID();
   const job = {
     id: jobId,
@@ -259,10 +259,6 @@ function parseRowRange(startRowValue, endRowValue, rowCount) {
 
   if (startRow > rowCount) {
     return { ok: false, error: `Start Row cannot be greater than ${rowCount}.` };
-  }
-
-  if (endRow > rowCount) {
-    return { ok: false, error: `End Row cannot be greater than ${rowCount}.` };
   }
 
   if (startRow > endRow) {

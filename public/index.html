@@ -372,7 +372,6 @@
         startRow.max = String(Math.max(rowCount, 1));
         startRow.value = "1";
         endRow.min = "1";
-        endRow.max = String(Math.max(rowCount, 1));
         endRow.value = String(rowCount);
         updateRangeSummary();
       }
@@ -380,11 +379,11 @@
       function updateRangeSummary() {
         const start = Number.parseInt(startRow.value || "1", 10);
         const end = Number.parseInt(endRow.value || String(uploadedRowCount), 10);
-        const valid = Number.isInteger(start) && Number.isInteger(end) && start >= 1 && end >= start && end <= uploadedRowCount;
+        const valid = Number.isInteger(start) && Number.isInteger(end) && start >= 1 && end >= start;
         const total = valid ? end - start + 1 : 0;
         rangeSummary.textContent = valid
-          ? `Total members in range: ${total}`
-          : `Choose rows between 1 and ${uploadedRowCount}.`;
+          ? `Total members requested: ${total}`
+          : "Start Row must be 1 or higher, and End Row must be greater than or equal to Start Row.";
         rangeSummary.className = valid ? "status" : "status error";
         startButton.disabled = !valid;
       }
