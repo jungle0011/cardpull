@@ -10,7 +10,7 @@ npm run install-browsers
 npm start
 ```
 
-Open `http://localhost:3000`, upload an `.xlsx` or `.xls` file, choose the email and password columns, then start processing.
+Open `http://localhost:3000`, upload `.xlsx`, `.xls`, or `.csv` files, choose the email column, then start processing.
 
 ## Bulk settings
 

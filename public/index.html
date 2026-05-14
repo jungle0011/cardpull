@@ -178,13 +178,16 @@
   <body>
     <main>
       <h1>cardpull</h1>
-      <p>Upload an Excel file, map the email and password columns, then download the captured membership cards as a ZIP.</p>
+      <p>Upload Excel or CSV files, map the email column, then download the captured membership cards as a ZIP.</p>
 
       <section class="panel">
         <form id="uploadForm">
-          <label for="spreadsheet">Excel file (.xlsx or .xls)</label>
-          <div class="row">
-            <input id="spreadsheet" name="spreadsheet" type="file" accept=".xlsx,.xls" multiple required />
+          <label for="spreadsheet">Excel or CSV files (.xlsx, .xls, .csv)</label>
+          <div id="fileInputs">
+            <input id="spreadsheet" name="spreadsheet" type="file" accept=".xlsx,.xls,.csv,text/csv" multiple required />
+          </div>
+          <div class="row" style="margin-top: 14px">
+            <button id="addFileInputButton" type="button">Add another file</button>
             <button id="uploadButton" type="submit">Upload</button>
           </div>
         </form>
@@ -255,6 +258,8 @@
     <script>
       const uploadForm = document.getElementById("uploadForm");
       const mappingForm = document.getElementById("mappingForm");
+      const fileInputs = document.getElementById("fileInputs");
+      const addFileInputButton = document.getElementById("addFileInputButton");
       const uploadButton = document.getElementById("uploadButton");
       const startButton = document.getElementById("startButton");
       const uploadStatus = document.getElementById("uploadStatus");
@@ -284,6 +289,16 @@
       let uploadedFiles = [];
       let pollTimer = null;
       let previewTimer = null;
+
+      addFileInputButton.addEventListener("click", () => {
+        const input = document.createElement("input");
+        input.name = "spreadsheet";
+        input.type = "file";
+        input.accept = ".xlsx,.xls,.csv,text/csv";
+        input.multiple = true;
+        input.style.marginTop = "10px";
+        fileInputs.appendChild(input);
+      });
 
       uploadForm.addEventListener("submit", async (event) => {
         event.preventDefault();

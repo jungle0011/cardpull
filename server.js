@@ -59,7 +59,7 @@ app.get("/health", (_req, res) => {
 app.post("/api/upload", upload.array("spreadsheet"), async (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: "Upload at least one Excel file first." });
+      return res.status(400).json({ error: "Upload at least one Excel or CSV file first." });
     }
 
     const parsedFiles = req.files.map((file) => {
@@ -97,7 +97,7 @@ app.post("/api/upload", upload.array("spreadsheet"), async (req, res) => {
       })),
     });
   } catch (error) {
-    res.status(400).json({ error: error.message || "Unable to read the uploaded Excel file." });
+    res.status(400).json({ error: error.message || "Unable to read the uploaded Excel or CSV file." });
   }
 });
 
@@ -106,7 +106,7 @@ app.post("/api/preview", (req, res) => {
   const meta = uploads.get(uploadId);
 
   if (!meta) {
-    return res.status(404).json({ error: "Upload not found. Please upload the Excel files again." });
+    return res.status(404).json({ error: "Upload not found. Please upload the Excel or CSV files again." });
   }
 
   const emailIndex = Number(emailColumnIndex);
@@ -131,7 +131,7 @@ app.post("/api/process", async (req, res) => {
   const meta = uploads.get(uploadId);
 
   if (!meta) {
-    return res.status(404).json({ error: "Upload not found. Please upload the Excel file again." });
+    return res.status(404).json({ error: "Upload not found. Please upload the Excel or CSV files again." });
   }
 
   const emailIndex = Number(emailColumnIndex);
