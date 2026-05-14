@@ -56,40 +56,78 @@ app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok" });
 });
 
-app.post("/api/upload", upload.single("spreadsheet"), async (req, res) => {
+app.post("/api/upload", upload.array("spreadsheet"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "Upload an Excel file first." });
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: "Upload at least one Excel file first." });
     }
 
-    const workbook = readWorkbookRows(req.file.path);
-    if (workbook.headers.length === 0) {
+    const parsedFiles = req.files.map((file) => {
+      const workbook = readWorkbookRows(file.path);
+      return {
+        id: crypto.randomUUID(),
+        filePath: file.path,
+        originalName: file.originalname,
+        headers: workbook.headers,
+        rowCount: workbook.rows.length,
+      };
+    });
+
+    if (parsedFiles[0].headers.length === 0) {
       return res.status(400).json({ error: "No header row was found in the first worksheet." });
     }
 
     const uploadId = crypto.randomUUID();
     uploads.set(uploadId, {
       id: uploadId,
-      filePath: req.file.path,
-      originalName: req.file.originalname,
-      headers: workbook.headers,
-      rowCount: workbook.rows.length,
+      files: parsedFiles,
+      headers: parsedFiles[0].headers,
+      rowCount: parsedFiles.reduce((total, file) => total + file.rowCount, 0),
       createdAt: new Date().toISOString(),
     });
 
     res.json({
       uploadId,
-      originalName: req.file.originalname,
-      headers: workbook.headers,
-      rowCount: workbook.rows.length,
+      headers: parsedFiles[0].headers,
+      rowCount: parsedFiles.reduce((total, file) => total + file.rowCount, 0),
+      files: parsedFiles.map((file) => ({
+        id: file.id,
+        originalName: file.originalName,
+        rowCount: file.rowCount,
+      })),
     });
   } catch (error) {
     res.status(400).json({ error: error.message || "Unable to read the uploaded Excel file." });
   }
 });
 
+app.post("/api/preview", (req, res) => {
+  const { uploadId, emailColumnIndex, fileRanges } = req.body;
+  const meta = uploads.get(uploadId);
+
+  if (!meta) {
+    return res.status(404).json({ error: "Upload not found. Please upload the Excel files again." });
+  }
+
+  const emailIndex = Number(emailColumnIndex);
+  const validIndexes = new Set(meta.headers.map((header) => header.index));
+  if (!validIndexes.has(emailIndex)) {
+    return res.status(400).json({ error: "Choose a valid email column." });
+  }
+
+  const prepared = prepareMembers(meta, emailIndex, "", fileRanges);
+  if (!prepared.ok) {
+    return res.status(400).json({ error: prepared.error });
+  }
+
+  res.json({
+    total: prepared.members.length,
+    fileCount: prepared.fileCount,
+  });
+});
+
 app.post("/api/process", async (req, res) => {
-  const { uploadId, emailColumnIndex, sharedPassword, startRow, endRow, concurrency } = req.body;
+  const { uploadId, emailColumnIndex, sharedPassword, fileRanges, concurrency } = req.body;
   const meta = uploads.get(uploadId);
 
   if (!meta) {
@@ -108,9 +146,9 @@ app.post("/api/process", async (req, res) => {
     return res.status(400).json({ error: "Enter the shared password." });
   }
 
-  const range = parseRowRange(startRow, endRow, meta.rowCount);
-  if (!range.ok) {
-    return res.status(400).json({ error: range.error });
+  const prepared = prepareMembers(meta, emailIndex, password, fileRanges);
+  if (!prepared.ok) {
+    return res.status(400).json({ error: prepared.error });
   }
 
   const requestedConcurrency = parseConcurrency(concurrency);
@@ -118,7 +156,7 @@ app.post("/api/process", async (req, res) => {
     return res.status(400).json({ error: requestedConcurrency.error });
   }
 
-  const rangeTotal = Math.max(Math.min(range.endRow, meta.rowCount) - range.startRow + 1, 0);
+  const rangeTotal = prepared.members.length;
   const jobId = crypto.randomUUID();
   const job = {
     id: jobId,
@@ -136,8 +174,9 @@ app.post("/api/process", async (req, res) => {
     alreadyDone: 0,
     remaining: rangeTotal,
     concurrency: requestedConcurrency.value,
-    startRow: range.startRow,
-    endRow: range.endRow,
+    fileRanges: prepared.fileRanges,
+    fileCount: prepared.fileCount,
+    preparedMembers: prepared.members,
     zipPath: path.join(ZIP_DIR, `${jobId}.zip`),
     printReadyPath: path.join(OUTPUT_DIR, PRINT_READY_FILE_NAME),
     printReadyUrl: null,
@@ -154,7 +193,7 @@ app.post("/api/process", async (req, res) => {
   };
 
   jobs.set(jobId, job);
-  runJob(job, meta, emailIndex, password).catch((error) => {
+  runJob(job).catch((error) => {
     job.status = "failed";
     job.error = error.message;
     job.message = "Run failed.";
@@ -268,6 +307,59 @@ function parseRowRange(startRowValue, endRowValue, rowCount) {
   return { ok: true, startRow, endRow };
 }
 
+function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
+  const rangesByFile = new Map(
+    Array.isArray(fileRanges)
+      ? fileRanges.map((range) => [range.fileId, range])
+      : []
+  );
+  const seen = new Set();
+  const members = [];
+  const resolvedRanges = [];
+
+  for (const file of meta.files) {
+    const requestedRange = rangesByFile.get(file.id) || {};
+    const range = parseRowRange(requestedRange.startRow, requestedRange.endRow, file.rowCount);
+    if (!range.ok) {
+      return { ok: false, error: `${file.originalName}: ${range.error}` };
+    }
+
+    resolvedRanges.push({
+      fileId: file.id,
+      originalName: file.originalName,
+      startRow: range.startRow,
+      endRow: range.endRow,
+      rowCount: file.rowCount,
+    });
+
+    const { rows } = readWorkbookRows(file.filePath);
+    const selectedRows = rows.slice(range.startRow - 1, range.endRow);
+
+    for (let index = 0; index < selectedRows.length; index += 1) {
+      const email = normalizeCell(selectedRows[index][emailIndex]);
+      const dedupeKey = email.toLowerCase();
+      if (!email || seen.has(dedupeKey)) {
+        continue;
+      }
+
+      seen.add(dedupeKey);
+      members.push({
+        rowNumber: range.startRow + index + 1,
+        fileName: file.originalName,
+        email,
+        password: sharedPassword,
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    members,
+    fileRanges: resolvedRanges,
+    fileCount: meta.files.length,
+  };
+}
+
 function parseConcurrency(value) {
   const parsed = value === "" || value == null
     ? DEFAULT_CONCURRENCY
@@ -280,17 +372,11 @@ function parseConcurrency(value) {
   return { ok: true, value: parsed };
 }
 
-async function runJob(job, meta, emailIndex, sharedPassword) {
+async function runJob(job) {
   await fsp.mkdir(job.outputPath, { recursive: true });
   await fsp.mkdir(ZIP_DIR, { recursive: true });
 
-  const { rows } = readWorkbookRows(meta.filePath);
-  const selectedRows = rows.slice(job.startRow - 1, job.endRow);
-  const members = selectedRows.map((row, index) => ({
-    rowNumber: job.startRow + index + 1,
-    email: normalizeCell(row[emailIndex]),
-    password: sharedPassword,
-  }));
+  const members = job.preparedMembers;
 
   job.total = members.length;
   job.remaining = members.length;
@@ -734,6 +820,8 @@ function publicJob(job) {
     concurrency: job.concurrency,
     startRow: job.startRow,
     endRow: job.endRow,
+    fileCount: job.fileCount,
+    fileRanges: job.fileRanges,
     failedList: job.failedList,
     message: job.message,
     downloadUrl: job.downloadUrl,

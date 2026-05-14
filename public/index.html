@@ -184,7 +184,7 @@
         <form id="uploadForm">
           <label for="spreadsheet">Excel file (.xlsx or .xls)</label>
           <div class="row">
-            <input id="spreadsheet" name="spreadsheet" type="file" accept=".xlsx,.xls" required />
+            <input id="spreadsheet" name="spreadsheet" type="file" accept=".xlsx,.xls" multiple required />
             <button id="uploadButton" type="submit">Upload</button>
           </div>
         </form>
@@ -206,16 +206,9 @@
               <label for="concurrencyInput">Speed (parallel downloads)</label>
               <input id="concurrencyInput" type="number" min="3" max="10" step="1" value="8" required />
             </div>
-            <div>
-              <label for="startRow">Start Row</label>
-              <input id="startRow" type="number" min="1" step="1" value="1" required />
-            </div>
-            <div>
-              <label for="endRow">End Row</label>
-              <input id="endRow" type="number" min="1" step="1" required />
-            </div>
           </div>
-          <p id="rangeSummary" class="status" style="margin-top: 16px">Total members in range: 0</p>
+          <div id="fileRanges" style="margin-top: 16px"></div>
+          <p id="rangeSummary" class="status" style="margin-top: 16px">Total members to process: 0 across 0 files</p>
           <div class="row" style="margin-top: 16px">
             <button id="startButton" type="submit">Start Processing</button>
           </div>
@@ -270,8 +263,7 @@
       const emailColumn = document.getElementById("emailColumn");
       const sharedPassword = document.getElementById("sharedPassword");
       const concurrencyInput = document.getElementById("concurrencyInput");
-      const startRow = document.getElementById("startRow");
-      const endRow = document.getElementById("endRow");
+      const fileRanges = document.getElementById("fileRanges");
       const rangeSummary = document.getElementById("rangeSummary");
       const progressText = document.getElementById("progressText");
       const progressBar = document.getElementById("progressBar");
@@ -289,8 +281,9 @@
       const runError = document.getElementById("runError");
 
       let uploadId = null;
-      let uploadedRowCount = 0;
+      let uploadedFiles = [];
       let pollTimer = null;
+      let previewTimer = null;
 
       uploadForm.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -309,10 +302,11 @@
           if (!response.ok) throw new Error(data.error || "Upload failed.");
 
           uploadId = data.uploadId;
-          uploadedRowCount = data.rowCount;
+          uploadedFiles = data.files || [];
           renderColumnOptions(data.headers);
-          resetRowRange(data.rowCount);
-          uploadStatus.textContent = `${data.originalName} loaded with ${data.rowCount} member rows.`;
+          renderFileRanges(uploadedFiles);
+          updateRangeSummary();
+          uploadStatus.textContent = `${uploadedFiles.length} file(s) loaded with ${data.rowCount} total member rows.`;
           mappingPanel.classList.remove("hidden");
         } catch (error) {
           uploadStatus.className = "status error";
@@ -338,8 +332,7 @@
               emailColumnIndex: emailColumn.value,
               sharedPassword: sharedPassword.value,
               concurrency: concurrencyInput.value,
-              startRow: startRow.value,
-              endRow: endRow.value,
+              fileRanges: getFileRanges(),
             }),
           });
           const data = await response.json();
@@ -364,28 +357,102 @@
         if (guessedEmail) emailColumn.value = guessedEmail.index;
       }
 
-      startRow.addEventListener("input", updateRangeSummary);
-      endRow.addEventListener("input", updateRangeSummary);
+      emailColumn.addEventListener("change", updateRangeSummary);
 
-      function resetRowRange(rowCount) {
-        startRow.min = "1";
-        startRow.max = String(Math.max(rowCount, 1));
-        startRow.value = "1";
-        endRow.min = "1";
-        endRow.value = String(rowCount);
-        updateRangeSummary();
+      function renderFileRanges(files) {
+        fileRanges.innerHTML = "";
+
+        for (const file of files) {
+          const row = document.createElement("div");
+          row.className = "grid";
+          row.style.marginTop = "10px";
+          row.dataset.fileId = file.id;
+          row.innerHTML = `
+            <div>
+              <label>File name</label>
+              <input type="text" value="${escapeAttribute(file.originalName)}" disabled />
+            </div>
+            <div>
+              <label>Total rows detected</label>
+              <input type="number" value="${file.rowCount}" disabled />
+            </div>
+            <div>
+              <label>Start Row</label>
+              <input class="file-start-row" type="number" min="1" step="1" value="1" required />
+            </div>
+            <div>
+              <label>End Row</label>
+              <input class="file-end-row" type="number" min="1" step="1" value="${file.rowCount}" required />
+            </div>
+          `;
+          fileRanges.appendChild(row);
+        }
+
+        fileRanges.querySelectorAll("input").forEach((input) => {
+          input.addEventListener("input", updateRangeSummary);
+        });
       }
 
       function updateRangeSummary() {
-        const start = Number.parseInt(startRow.value || "1", 10);
-        const end = Number.parseInt(endRow.value || String(uploadedRowCount), 10);
-        const valid = Number.isInteger(start) && Number.isInteger(end) && start >= 1 && end >= start;
-        const total = valid ? end - start + 1 : 0;
-        rangeSummary.textContent = valid
-          ? `Total members requested: ${total}`
-          : "Start Row must be 1 or higher, and End Row must be greater than or equal to Start Row.";
-        rangeSummary.className = valid ? "status" : "status error";
-        startButton.disabled = !valid;
+        const ranges = getFileRanges();
+        const valid = ranges.length > 0 && ranges.every((range) => {
+          const start = Number.parseInt(range.startRow, 10);
+          const end = Number.parseInt(range.endRow, 10);
+          return Number.isInteger(start) && Number.isInteger(end) && start >= 1 && end >= start;
+        });
+
+        if (!valid) {
+          rangeSummary.textContent = "Each file needs a Start Row of 1 or higher and an End Row greater than or equal to Start Row.";
+          rangeSummary.className = "status error";
+          startButton.disabled = true;
+          return;
+        }
+
+        rangeSummary.className = "status";
+        rangeSummary.textContent = "Calculating combined total...";
+        startButton.disabled = true;
+
+        if (previewTimer) clearTimeout(previewTimer);
+        previewTimer = setTimeout(previewCombinedTotal, 250);
+      }
+
+      async function previewCombinedTotal() {
+        try {
+          const response = await fetch("/api/preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              uploadId,
+              emailColumnIndex: emailColumn.value,
+              fileRanges: getFileRanges(),
+            }),
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "Could not calculate total.");
+          rangeSummary.textContent = `Total members to process: ${data.total} across ${data.fileCount} files`;
+          rangeSummary.className = "status";
+          startButton.disabled = data.total < 1;
+        } catch (error) {
+          rangeSummary.textContent = error.message;
+          rangeSummary.className = "status error";
+          startButton.disabled = true;
+        }
+      }
+
+      function getFileRanges() {
+        return Array.from(fileRanges.querySelectorAll("[data-file-id]")).map((row) => ({
+          fileId: row.dataset.fileId,
+          startRow: row.querySelector(".file-start-row").value,
+          endRow: row.querySelector(".file-end-row").value,
+        }));
+      }
+
+      function escapeAttribute(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;");
       }
 
       function pollJob(jobId) {
@@ -472,9 +539,11 @@
 
       function clearProgress() {
         if (pollTimer) clearInterval(pollTimer);
+        if (previewTimer) clearTimeout(previewTimer);
         pollTimer = null;
         uploadId = null;
-        uploadedRowCount = 0;
+        uploadedFiles = [];
+        fileRanges.innerHTML = "";
         mappingPanel.classList.add("hidden");
         progressPanel.classList.add("hidden");
         downloadWrap.classList.add("hidden");
