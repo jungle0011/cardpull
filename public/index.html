@@ -202,7 +202,16 @@
               <label for="passwordColumn">Select Password Column</label>
               <select id="passwordColumn" required></select>
             </div>
+            <div>
+              <label for="startRow">Start Row</label>
+              <input id="startRow" type="number" min="1" step="1" value="1" required />
+            </div>
+            <div>
+              <label for="endRow">End Row</label>
+              <input id="endRow" type="number" min="1" step="1" required />
+            </div>
           </div>
+          <p id="rangeSummary" class="status" style="margin-top: 16px">Total members in range: 0</p>
           <div class="row" style="margin-top: 16px">
             <button id="startButton" type="submit">Start Processing</button>
           </div>
@@ -249,6 +258,9 @@
       const progressPanel = document.getElementById("progressPanel");
       const emailColumn = document.getElementById("emailColumn");
       const passwordColumn = document.getElementById("passwordColumn");
+      const startRow = document.getElementById("startRow");
+      const endRow = document.getElementById("endRow");
+      const rangeSummary = document.getElementById("rangeSummary");
       const progressText = document.getElementById("progressText");
       const progressBar = document.getElementById("progressBar");
       const successCount = document.getElementById("successCount");
@@ -260,6 +272,7 @@
       const runError = document.getElementById("runError");
 
       let uploadId = null;
+      let uploadedRowCount = 0;
       let pollTimer = null;
 
       uploadForm.addEventListener("submit", async (event) => {
@@ -279,7 +292,9 @@
           if (!response.ok) throw new Error(data.error || "Upload failed.");
 
           uploadId = data.uploadId;
+          uploadedRowCount = data.rowCount;
           renderColumnOptions(data.headers);
+          resetRowRange(data.rowCount);
           uploadStatus.textContent = `${data.originalName} loaded with ${data.rowCount} member rows.`;
           mappingPanel.classList.remove("hidden");
         } catch (error) {
@@ -305,6 +320,8 @@
               uploadId,
               emailColumnIndex: emailColumn.value,
               passwordColumnIndex: passwordColumn.value,
+              startRow: startRow.value,
+              endRow: endRow.value,
             }),
           });
           const data = await response.json();
@@ -332,6 +349,31 @@
         const guessedPassword = headers.find((header) => /password|pass|pin/i.test(header.name));
         if (guessedEmail) emailColumn.value = guessedEmail.index;
         if (guessedPassword) passwordColumn.value = guessedPassword.index;
+      }
+
+      startRow.addEventListener("input", updateRangeSummary);
+      endRow.addEventListener("input", updateRangeSummary);
+
+      function resetRowRange(rowCount) {
+        startRow.min = "1";
+        startRow.max = String(Math.max(rowCount, 1));
+        startRow.value = "1";
+        endRow.min = "1";
+        endRow.max = String(Math.max(rowCount, 1));
+        endRow.value = String(rowCount);
+        updateRangeSummary();
+      }
+
+      function updateRangeSummary() {
+        const start = Number.parseInt(startRow.value || "1", 10);
+        const end = Number.parseInt(endRow.value || String(uploadedRowCount), 10);
+        const valid = Number.isInteger(start) && Number.isInteger(end) && start >= 1 && end >= start && end <= uploadedRowCount;
+        const total = valid ? end - start + 1 : 0;
+        rangeSummary.textContent = valid
+          ? `Total members in range: ${total}`
+          : `Choose rows between 1 and ${uploadedRowCount}.`;
+        rangeSummary.className = valid ? "status" : "status error";
+        startButton.disabled = !valid;
       }
 
       function pollJob(jobId) {
@@ -388,6 +430,7 @@
         if (pollTimer) clearInterval(pollTimer);
         pollTimer = null;
         uploadId = null;
+        uploadedRowCount = 0;
         mappingPanel.classList.add("hidden");
         progressPanel.classList.add("hidden");
         downloadWrap.classList.add("hidden");

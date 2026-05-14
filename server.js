@@ -80,7 +80,7 @@ app.post("/api/upload", upload.single("spreadsheet"), async (req, res) => {
 });
 
 app.post("/api/process", async (req, res) => {
-  const { uploadId, emailColumnIndex, passwordColumnIndex } = req.body;
+  const { uploadId, emailColumnIndex, passwordColumnIndex, startRow, endRow } = req.body;
   const meta = uploads.get(uploadId);
 
   if (!meta) {
@@ -99,13 +99,19 @@ app.post("/api/process", async (req, res) => {
     return res.status(400).json({ error: "Email and password columns must be different." });
   }
 
+  const range = parseRowRange(startRow, endRow, meta.rowCount);
+  if (!range.ok) {
+    return res.status(400).json({ error: range.error });
+  }
+
+  const rangeTotal = range.endRow - range.startRow + 1;
   const jobId = crypto.randomUUID();
   const job = {
     id: jobId,
     uploadId,
     status: "queued",
     current: 0,
-    total: meta.rowCount,
+    total: rangeTotal,
     success: 0,
     failed: 0,
     message: "Queued...",
@@ -114,8 +120,10 @@ app.post("/api/process", async (req, res) => {
     finishedAt: null,
     error: null,
     alreadyDone: 0,
-    remaining: meta.rowCount,
+    remaining: rangeTotal,
     concurrency: CONCURRENCY,
+    startRow: range.startRow,
+    endRow: range.endRow,
     zipPath: path.join(ZIP_DIR, `${jobId}.zip`),
     outputPath: OUTPUT_DIR,
     failedPath: path.join(OUTPUT_DIR, "failed.txt"),
@@ -193,13 +201,47 @@ function readWorkbookRows(filePath) {
   return { headers, rows };
 }
 
+function parseRowRange(startRowValue, endRowValue, rowCount) {
+  if (rowCount < 1) {
+    return { ok: false, error: "The uploaded sheet does not have any member rows." };
+  }
+
+  const startRow = Number.parseInt(String(startRowValue || "1"), 10);
+  const endRow = endRowValue === "" || endRowValue == null
+    ? rowCount
+    : Number.parseInt(String(endRowValue), 10);
+
+  if (!Number.isInteger(startRow) || startRow < 1) {
+    return { ok: false, error: "Start Row must be 1 or higher." };
+  }
+
+  if (!Number.isInteger(endRow) || endRow < 1) {
+    return { ok: false, error: "End Row must be 1 or higher." };
+  }
+
+  if (startRow > rowCount) {
+    return { ok: false, error: `Start Row cannot be greater than ${rowCount}.` };
+  }
+
+  if (endRow > rowCount) {
+    return { ok: false, error: `End Row cannot be greater than ${rowCount}.` };
+  }
+
+  if (startRow > endRow) {
+    return { ok: false, error: "Start Row cannot be greater than End Row." };
+  }
+
+  return { ok: true, startRow, endRow };
+}
+
 async function runJob(job, meta, emailIndex, passwordIndex) {
   await fsp.mkdir(job.outputPath, { recursive: true });
   await fsp.mkdir(ZIP_DIR, { recursive: true });
 
   const { rows } = readWorkbookRows(meta.filePath);
-  const members = rows.map((row, index) => ({
-    rowNumber: index + 2,
+  const selectedRows = rows.slice(job.startRow - 1, job.endRow);
+  const members = selectedRows.map((row, index) => ({
+    rowNumber: job.startRow + index + 1,
     email: normalizeCell(row[emailIndex]),
     password: normalizeCell(row[passwordIndex]),
   }));
@@ -515,6 +557,8 @@ function publicJob(job) {
     alreadyDone: job.alreadyDone,
     remaining: job.remaining,
     concurrency: job.concurrency,
+    startRow: job.startRow,
+    endRow: job.endRow,
     message: job.message,
     downloadUrl: job.downloadUrl,
     startedAt: job.startedAt,
