@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cardpull</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #18201d;
+        --muted: #66716b;
+        --line: #d8ded9;
+        --panel: #ffffff;
+        --page: #f4f7f5;
+        --green: #147a45;
+        --green-dark: #0e5631;
+        --red: #b42318;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: Arial, Helvetica, sans-serif;
+        background: var(--page);
+        color: var(--ink);
+      }
+
+      main {
+        width: min(920px, calc(100% - 32px));
+        margin: 32px auto;
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 32px;
+        letter-spacing: 0;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .panel {
+        margin-top: 22px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 22px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 700;
+      }
+
+      input,
+      select {
+        width: 100%;
+        min-height: 42px;
+        border: 1px solid #bfc8c1;
+        border-radius: 6px;
+        padding: 9px 10px;
+        font: inherit;
+        background: #fff;
+        color: var(--ink);
+      }
+
+      button,
+      .download {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        border: 0;
+        border-radius: 6px;
+        padding: 10px 16px;
+        background: var(--green);
+        color: #fff;
+        font: inherit;
+        font-weight: 700;
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      button:hover,
+      .download:hover {
+        background: var(--green-dark);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .status {
+        margin-top: 16px;
+        padding: 14px;
+        border-radius: 6px;
+        background: #eef5f1;
+        border: 1px solid #c9ded1;
+      }
+
+      .error {
+        color: var(--red);
+        font-weight: 700;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      progress {
+        width: 100%;
+        height: 18px;
+        accent-color: var(--green);
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      .stat {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 12px;
+        background: #fff;
+      }
+
+      .stat strong {
+        display: block;
+        font-size: 24px;
+      }
+
+      .stat span {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      @media (max-width: 680px) {
+        main {
+          width: min(100% - 20px, 920px);
+          margin: 18px auto;
+        }
+
+        .grid,
+        .stats {
+          grid-template-columns: 1fr;
+        }
+
+        h1 {
+          font-size: 26px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>cardpull</h1>
+      <p>Upload an Excel file, map the email and password columns, then download the captured membership cards as a ZIP.</p>
+
+      <section class="panel">
+        <form id="uploadForm">
+          <label for="spreadsheet">Excel file (.xlsx or .xls)</label>
+          <div class="row">
+            <input id="spreadsheet" name="spreadsheet" type="file" accept=".xlsx,.xls" required />
+            <button id="uploadButton" type="submit">Upload</button>
+          </div>
+        </form>
+        <p id="uploadStatus" class="status hidden"></p>
+      </section>
+
+      <section id="mappingPanel" class="panel hidden">
+        <form id="mappingForm">
+          <div class="grid">
+            <div>
+              <label for="emailColumn">Select Email Column</label>
+              <select id="emailColumn" required></select>
+            </div>
+            <div>
+              <label for="passwordColumn">Select Password Column</label>
+              <select id="passwordColumn" required></select>
+            </div>
+          </div>
+          <div class="row" style="margin-top: 16px">
+            <button id="startButton" type="submit">Start Processing</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="progressPanel" class="panel hidden">
+        <p id="progressText">Processing 0 of 0...</p>
+        <div style="margin-top: 12px">
+          <progress id="progressBar" value="0" max="100"></progress>
+        </div>
+        <div class="stats">
+          <div class="stat">
+            <strong id="successCount">0</strong>
+            <span>Saved cards</span>
+          </div>
+          <div class="stat">
+            <strong id="alreadyDoneCount">0</strong>
+            <span>Already done</span>
+          </div>
+          <div class="stat">
+            <strong id="failedCount">0</strong>
+            <span>Failed logins</span>
+          </div>
+          <div class="stat">
+            <strong id="statusText">Idle</strong>
+            <span>Status</span>
+          </div>
+        </div>
+        <div id="downloadWrap" class="row hidden" style="margin-top: 16px">
+          <a id="downloadLink" class="download" href="#">Download ZIP</a>
+        </div>
+        <p id="runError" class="status error hidden"></p>
+      </section>
+    </main>
+
+    <script>
+      const uploadForm = document.getElementById("uploadForm");
+      const mappingForm = document.getElementById("mappingForm");
+      const uploadButton = document.getElementById("uploadButton");
+      const startButton = document.getElementById("startButton");
+      const uploadStatus = document.getElementById("uploadStatus");
+      const mappingPanel = document.getElementById("mappingPanel");
+      const progressPanel = document.getElementById("progressPanel");
+      const emailColumn = document.getElementById("emailColumn");
+      const passwordColumn = document.getElementById("passwordColumn");
+      const progressText = document.getElementById("progressText");
+      const progressBar = document.getElementById("progressBar");
+      const successCount = document.getElementById("successCount");
+      const alreadyDoneCount = document.getElementById("alreadyDoneCount");
+      const failedCount = document.getElementById("failedCount");
+      const statusText = document.getElementById("statusText");
+      const downloadWrap = document.getElementById("downloadWrap");
+      const downloadLink = document.getElementById("downloadLink");
+      const runError = document.getElementById("runError");
+
+      let uploadId = null;
+      let pollTimer = null;
+
+      uploadForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        clearProgress();
+        uploadButton.disabled = true;
+        uploadStatus.className = "status";
+        uploadStatus.textContent = "Reading Excel headers...";
+
+        try {
+          const formData = new FormData(uploadForm);
+          const response = await fetch("/api/upload", {
+            method: "POST",
+            body: formData,
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "Upload failed.");
+
+          uploadId = data.uploadId;
+          renderColumnOptions(data.headers);
+          uploadStatus.textContent = `${data.originalName} loaded with ${data.rowCount} member rows.`;
+          mappingPanel.classList.remove("hidden");
+        } catch (error) {
+          uploadStatus.className = "status error";
+          uploadStatus.textContent = error.message;
+        } finally {
+          uploadButton.disabled = false;
+        }
+      });
+
+      mappingForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        startButton.disabled = true;
+        progressPanel.classList.remove("hidden");
+        runError.classList.add("hidden");
+        downloadWrap.classList.add("hidden");
+
+        try {
+          const response = await fetch("/api/process", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              uploadId,
+              emailColumnIndex: emailColumn.value,
+              passwordColumnIndex: passwordColumn.value,
+            }),
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "Could not start processing.");
+          pollJob(data.jobId);
+        } catch (error) {
+          runError.textContent = error.message;
+          runError.classList.remove("hidden");
+          startButton.disabled = false;
+        }
+      });
+
+      function renderColumnOptions(headers) {
+        emailColumn.innerHTML = "";
+        passwordColumn.innerHTML = "";
+
+        for (const header of headers) {
+          const emailOption = new Option(header.name, header.index);
+          const passwordOption = new Option(header.name, header.index);
+          emailColumn.add(emailOption);
+          passwordColumn.add(passwordOption);
+        }
+
+        const guessedEmail = headers.find((header) => /email|phone|member|username/i.test(header.name));
+        const guessedPassword = headers.find((header) => /password|pass|pin/i.test(header.name));
+        if (guessedEmail) emailColumn.value = guessedEmail.index;
+        if (guessedPassword) passwordColumn.value = guessedPassword.index;
+      }
+
+      function pollJob(jobId) {
+        if (pollTimer) clearInterval(pollTimer);
+        const tick = async () => {
+          try {
+            const response = await fetch(`/api/jobs/${jobId}`);
+            const job = await response.json();
+            if (!response.ok) throw new Error(job.error || "Could not read progress.");
+            renderJob(job);
+            if (["completed", "failed"].includes(job.status)) {
+              clearInterval(pollTimer);
+              pollTimer = null;
+              startButton.disabled = false;
+            }
+          } catch (error) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+            runError.textContent = error.message;
+            runError.classList.remove("hidden");
+            startButton.disabled = false;
+          }
+        };
+        tick();
+        pollTimer = setInterval(tick, 1000);
+      }
+
+      function renderJob(job) {
+        const total = job.total || 0;
+        const current = job.current || 0;
+        progressText.textContent = total
+          ? `${job.alreadyDone || 0} already done, processing remaining ${job.remaining || 0}... Processing ${current} of ${total}.`
+          : job.message;
+        progressBar.max = total || 100;
+        progressBar.value = total ? current : 0;
+        successCount.textContent = job.success;
+        alreadyDoneCount.textContent = job.alreadyDone || 0;
+        failedCount.textContent = job.failed;
+        statusText.textContent = job.concurrency ? `${job.status} (${job.concurrency}x)` : job.status;
+
+        if (job.status === "completed") {
+          progressText.textContent = job.message;
+          downloadLink.href = job.downloadUrl;
+          downloadWrap.classList.remove("hidden");
+        }
+
+        if (job.status === "failed") {
+          runError.textContent = job.error || "Run failed.";
+          runError.classList.remove("hidden");
+        }
+      }
+
+      function clearProgress() {
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = null;
+        uploadId = null;
+        mappingPanel.classList.add("hidden");
+        progressPanel.classList.add("hidden");
+        downloadWrap.classList.add("hidden");
+        runError.classList.add("hidden");
+        progressBar.value = 0;
+        successCount.textContent = "0";
+        alreadyDoneCount.textContent = "0";
+        failedCount.textContent = "0";
+        statusText.textContent = "Idle";
+      }
+    </script>
+  </body>
+</html>

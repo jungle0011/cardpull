@@ -1,0 +1,24 @@
+{
+  "name": "cardpull",
+  "version": "1.0.0",
+  "description": "Bulk PDP membership ID card screenshot automation.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "install-browsers": "playwright install chromium",
+    "check": "node --check server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "express": "^5.2.1",
+    "multer": "^2.1.1",
+    "p-limit": "^3.1.0",
+    "playwright": "^1.60.0",
+    "xlsx": "^0.18.5"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules
+output
+uploads
+npm-debug.log
+.DS_Store
+.git
+.env
