@@ -62,16 +62,34 @@ app.post("/api/upload", upload.array("spreadsheet"), async (req, res) => {
       return res.status(400).json({ error: "Upload at least one Excel or CSV file first." });
     }
 
-    const parsedFiles = req.files.map((file) => {
-      const workbook = readWorkbookRows(file.path);
-      return {
-        id: crypto.randomUUID(),
-        filePath: file.path,
-        originalName: file.originalname,
-        headers: workbook.headers,
-        rowCount: workbook.rows.length,
-      };
-    });
+    const parsedFiles = [];
+    const fileWarnings = [];
+
+    for (const file of req.files) {
+      try {
+        const workbook = readWorkbookRows(file.path);
+        if (workbook.headers.length === 0 || workbook.rows.length === 0) {
+          fileWarnings.push(`${file.originalname}: no usable member rows found`);
+          continue;
+        }
+
+        parsedFiles.push({
+          id: crypto.randomUUID(),
+          filePath: file.path,
+          originalName: file.originalname,
+          headers: workbook.headers,
+          rowCount: workbook.rows.length,
+        });
+      } catch (error) {
+        fileWarnings.push(`${file.originalname}: ${error.message}`);
+      }
+    }
+
+    if (parsedFiles.length === 0) {
+      return res.status(400).json({
+        error: `No uploaded files could be read. ${fileWarnings.join(" ")}`.trim(),
+      });
+    }
 
     if (parsedFiles[0].headers.length === 0) {
       return res.status(400).json({ error: "No header row was found in the first worksheet." });
@@ -95,6 +113,7 @@ app.post("/api/upload", upload.array("spreadsheet"), async (req, res) => {
         originalName: file.originalName,
         rowCount: file.rowCount,
       })),
+      warnings: fileWarnings,
     });
   } catch (error) {
     res.status(400).json({ error: error.message || "Unable to read the uploaded Excel or CSV file." });
@@ -123,6 +142,7 @@ app.post("/api/preview", (req, res) => {
   res.json({
     total: prepared.members.length,
     fileCount: prepared.fileCount,
+    warnings: prepared.warnings,
   });
 });
 
@@ -176,6 +196,7 @@ app.post("/api/process", async (req, res) => {
     concurrency: requestedConcurrency.value,
     fileRanges: prepared.fileRanges,
     fileCount: prepared.fileCount,
+    parseWarnings: prepared.warnings,
     preparedMembers: prepared.members,
     zipPath: path.join(ZIP_DIR, `${jobId}.zip`),
     printReadyPath: path.join(OUTPUT_DIR, PRINT_READY_FILE_NAME),
@@ -316,6 +337,7 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
   const seen = new Set();
   const members = [];
   const resolvedRanges = [];
+  const warnings = [];
 
   for (const file of meta.files) {
     const requestedRange = rangesByFile.get(file.id) || {};
@@ -332,11 +354,18 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
       rowCount: file.rowCount,
     });
 
-    const { rows } = readWorkbookRows(file.filePath);
+    let rows;
+    try {
+      rows = readWorkbookRows(file.filePath).rows;
+    } catch (error) {
+      warnings.push(`${file.originalName}: ${error.message}`);
+      continue;
+    }
+
     const selectedRows = rows.slice(range.startRow - 1, range.endRow);
 
     for (let index = 0; index < selectedRows.length; index += 1) {
-      const email = normalizeCell(selectedRows[index][emailIndex]);
+      const email = normalizeMemberId(selectedRows[index][emailIndex]);
       const dedupeKey = email.toLowerCase();
       if (!email || seen.has(dedupeKey)) {
         continue;
@@ -357,6 +386,7 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
     members,
     fileRanges: resolvedRanges,
     fileCount: meta.files.length,
+    warnings,
   };
 }
 
@@ -822,6 +852,7 @@ function publicJob(job) {
     endRow: job.endRow,
     fileCount: job.fileCount,
     fileRanges: job.fileRanges,
+    parseWarnings: job.parseWarnings,
     failedList: job.failedList,
     message: job.message,
     downloadUrl: job.downloadUrl,
@@ -839,6 +870,34 @@ function safeFileName(value) {
     .replace(/[/\\?%*:|"<>]/g, "_")
     .replace(/\s+/g, "_")
     .slice(0, 180);
+}
+
+function normalizeMemberId(value) {
+  let text = normalizeCell(value);
+  if (!text) {
+    return "";
+  }
+
+  text = text.replace(/\u00a0/g, " ").trim();
+
+  if (text.includes("@")) {
+    return text.replace(/\s+/g, "").toLowerCase();
+  }
+
+  const digits = text.replace(/[^\d]/g, "");
+  if (!digits) {
+    return "";
+  }
+
+  if (digits.length === 10 && /^[789]/.test(digits)) {
+    return `0${digits}`;
+  }
+
+  if (digits.length === 13 && digits.startsWith("234")) {
+    return `0${digits.slice(3)}`;
+  }
+
+  return digits;
 }
 
 function clampNumber(value, min, max) {

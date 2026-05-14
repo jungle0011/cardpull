@@ -321,7 +321,8 @@
           renderColumnOptions(data.headers);
           renderFileRanges(uploadedFiles);
           updateRangeSummary();
-          uploadStatus.textContent = `${uploadedFiles.length} file(s) loaded with ${data.rowCount} total member rows.`;
+          const warningText = data.warnings?.length ? ` Warnings: ${data.warnings.join(" ")}` : "";
+          uploadStatus.textContent = `${uploadedFiles.length} file(s) loaded with ${data.rowCount} total member rows.${warningText}`;
           mappingPanel.classList.remove("hidden");
         } catch (error) {
           uploadStatus.className = "status error";
@@ -444,7 +445,8 @@
           });
           const data = await response.json();
           if (!response.ok) throw new Error(data.error || "Could not calculate total.");
-          rangeSummary.textContent = `Total members to process: ${data.total} across ${data.fileCount} files`;
+          const warningText = data.warnings?.length ? ` Warnings: ${data.warnings.join(" ")}` : "";
+          rangeSummary.textContent = `Total members to process: ${data.total} across ${data.fileCount} files.${warningText}`;
           rangeSummary.className = "status";
           startButton.disabled = data.total < 1;
         } catch (error) {
