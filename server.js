@@ -3,6 +3,7 @@ const multer = require("multer");
 const XLSX = require("xlsx");
 const archiver = require("archiver");
 const pLimit = require("p-limit");
+const { PDFDocument } = require("pdf-lib");
 const { chromium } = require("playwright");
 const crypto = require("crypto");
 const fs = require("fs");
@@ -19,9 +20,10 @@ const OUTPUT_DIR = process.env.OUTPUT_DIR || (IS_RENDER ? "/tmp/output" : path.j
 const ZIP_DIR = path.join(OUTPUT_DIR, "_zips");
 const RATE_LIMIT_MS = Number(process.env.RATE_LIMIT_MS || 3000);
 const MEMBER_TIMEOUT_MS = Number(process.env.MEMBER_TIMEOUT_MS || 60000);
-const CONCURRENCY = Number(process.env.CONCURRENCY || 5);
+const DEFAULT_CONCURRENCY = clampNumber(Number(process.env.CONCURRENCY || 8), 3, 10);
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
 const COMMON_CARD_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".webp"];
+const PRINT_READY_FILE_NAME = "all-cards-print-ready.pdf";
 
 const uploads = new Map();
 const jobs = new Map();
@@ -83,7 +85,7 @@ app.post("/api/upload", upload.single("spreadsheet"), async (req, res) => {
 });
 
 app.post("/api/process", async (req, res) => {
-  const { uploadId, emailColumnIndex, sharedPassword, startRow, endRow } = req.body;
+  const { uploadId, emailColumnIndex, sharedPassword, startRow, endRow, concurrency } = req.body;
   const meta = uploads.get(uploadId);
 
   if (!meta) {
@@ -107,6 +109,11 @@ app.post("/api/process", async (req, res) => {
     return res.status(400).json({ error: range.error });
   }
 
+  const requestedConcurrency = parseConcurrency(concurrency);
+  if (!requestedConcurrency.ok) {
+    return res.status(400).json({ error: requestedConcurrency.error });
+  }
+
   const rangeTotal = range.endRow - range.startRow + 1;
   const jobId = crypto.randomUUID();
   const job = {
@@ -124,14 +131,17 @@ app.post("/api/process", async (req, res) => {
     error: null,
     alreadyDone: 0,
     remaining: rangeTotal,
-    concurrency: CONCURRENCY,
+    concurrency: requestedConcurrency.value,
     startRow: range.startRow,
     endRow: range.endRow,
     zipPath: path.join(ZIP_DIR, `${jobId}.zip`),
+    printReadyPath: path.join(OUTPUT_DIR, PRINT_READY_FILE_NAME),
+    printReadyUrl: null,
     outputPath: OUTPUT_DIR,
     failedPath: path.join(ZIP_DIR, `${jobId}-failed.txt`),
     progressPath: path.join(OUTPUT_DIR, "progress.json"),
     outputFiles: [],
+    failedList: [],
     _failedWriteQueue: Promise.resolve(),
     _progressWriteQueue: Promise.resolve(),
     _lastProgressSaved: 0,
@@ -164,6 +174,15 @@ app.get("/download/:jobId", (req, res) => {
   }
 
   res.download(job.zipPath, `cardpull-${job.id}.zip`);
+});
+
+app.get("/download/:jobId/print-ready", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job || job.status !== "completed" || !job.printReadyPath || !fs.existsSync(job.printReadyPath)) {
+    return res.status(404).send("Print-ready PDF is not ready yet.");
+  }
+
+  res.download(job.printReadyPath, PRINT_READY_FILE_NAME);
 });
 
 app.use((error, _req, res, _next) => {
@@ -238,6 +257,18 @@ function parseRowRange(startRowValue, endRowValue, rowCount) {
   return { ok: true, startRow, endRow };
 }
 
+function parseConcurrency(value) {
+  const parsed = value === "" || value == null
+    ? DEFAULT_CONCURRENCY
+    : Number.parseInt(String(value), 10);
+
+  if (!Number.isInteger(parsed) || parsed < 3 || parsed > 10) {
+    return { ok: false, error: "Speed must be between 3 and 10 parallel downloads." };
+  }
+
+  return { ok: true, value: parsed };
+}
+
 async function runJob(job, meta, emailIndex, sharedPassword) {
   await fsp.mkdir(job.outputPath, { recursive: true });
   await fsp.mkdir(ZIP_DIR, { recursive: true });
@@ -256,7 +287,7 @@ async function runJob(job, meta, emailIndex, sharedPassword) {
   job.message = `0 already done, processing remaining ${job.remaining}...`;
   await saveProgress(job, true);
 
-  const limit = pLimit(Math.max(1, CONCURRENCY));
+  const limit = pLimit(job.concurrency);
   const tasks = members.map((member) =>
     limit(async () => {
       let usedBrowser = false;
@@ -271,13 +302,13 @@ async function runJob(job, meta, emailIndex, sharedPassword) {
         const existingFile = await findExistingCardFile(job.outputPath, member.email);
         if (existingFile) {
           job.alreadyDone += 1;
-          job.outputFiles.push(existingFile);
+          member.outputFile = existingFile;
           return;
         }
 
         usedBrowser = true;
         const savedFile = await processMemberWithRetries(member, job.outputPath);
-        job.outputFiles.push(savedFile);
+        member.outputFile = savedFile;
         job.success += 1;
       } catch (error) {
         await recordFailure(job, member.email || `row-${member.rowNumber}`, error.message);
@@ -296,13 +327,18 @@ async function runJob(job, meta, emailIndex, sharedPassword) {
   );
 
   await Promise.all(tasks);
+  job.outputFiles = members.map((member) => member.outputFile).filter(Boolean);
   await Promise.all([job._failedWriteQueue, job._progressWriteQueue]);
   await saveProgress(job, true);
 
   job.status = "zipping";
-  job.message = "Creating ZIP...";
+  job.message = "Creating print-ready PDF and ZIP...";
   await saveProgress(job, true);
-  await zipFiles(job.outputFiles, job.failedPath, job.zipPath);
+  const mergedPdfPath = await mergePdfFiles(job.outputFiles, job.printReadyPath);
+  if (mergedPdfPath) {
+    job.printReadyUrl = `/download/${job.id}/print-ready`;
+  }
+  await zipFiles(mergedPdfPath ? [...job.outputFiles, mergedPdfPath] : job.outputFiles, job.failedPath, job.zipPath);
   job.status = "completed";
   job.message = `Completed ${job.total} members. ${job.alreadyDone} already done, ${job.success} downloaded, ${job.failed} failed.`;
   job.downloadUrl = `/download/${job.id}`;
@@ -489,6 +525,31 @@ function zipFiles(filePaths, failedPath, destinationPath) {
   });
 }
 
+async function mergePdfFiles(filePaths, destinationPath) {
+  const pdfPaths = [...new Set(filePaths)]
+    .filter((filePath) => filePath && path.extname(filePath).toLowerCase() === ".pdf")
+    .filter((filePath) => fs.existsSync(filePath));
+
+  if (pdfPaths.length === 0) {
+    return null;
+  }
+
+  const mergedPdf = await PDFDocument.create();
+
+  for (const pdfPath of pdfPaths) {
+    const sourceBytes = await fsp.readFile(pdfPath);
+    const sourcePdf = await PDFDocument.load(sourceBytes);
+    const copiedPages = await mergedPdf.copyPages(sourcePdf, sourcePdf.getPageIndices());
+    for (const page of copiedPages) {
+      mergedPdf.addPage(page);
+    }
+  }
+
+  const mergedBytes = await mergedPdf.save();
+  await fsp.writeFile(destinationPath, mergedBytes);
+  return destinationPath;
+}
+
 function getChromiumLaunchOptions() {
   const launchOptions = {
     headless: true,
@@ -548,6 +609,7 @@ async function pathExists(filePath) {
 
 async function recordFailure(job, email, reason) {
   const cleanReason = String(reason || "Unknown error").replace(/\s+/g, " ").trim();
+  job.failedList.push({ email, reason: cleanReason });
   job._failedWriteQueue = job._failedWriteQueue.catch(() => {}).then(() =>
     fsp.appendFile(job.failedPath, `${new Date().toISOString()}\t${email}\t${cleanReason}\n`, "utf8")
   );
@@ -565,6 +627,7 @@ async function saveProgress(job, force = false) {
     outputPath: job.outputPath,
     failedPath: job.failedPath,
     progressPath: job.progressPath,
+    printReadyPath: job.printReadyPath,
     updatedAt: new Date().toISOString(),
   };
 
@@ -591,8 +654,10 @@ function publicJob(job) {
     concurrency: job.concurrency,
     startRow: job.startRow,
     endRow: job.endRow,
+    failedList: job.failedList,
     message: job.message,
     downloadUrl: job.downloadUrl,
+    printReadyUrl: job.printReadyUrl,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     error: job.error,
@@ -605,6 +670,14 @@ function safeFileName(value) {
     .replace(/[/\\?%*:|"<>]/g, "_")
     .replace(/\s+/g, "_")
     .slice(0, 180);
+}
+
+function clampNumber(value, min, max) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+
+  return Math.min(Math.max(value, min), max);
 }
 
 function normalizeCell(value) {
