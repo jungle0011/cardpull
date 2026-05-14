@@ -4,31 +4,11 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=3000
-ENV PLAYWRIGHT_BROWSERS_PATH=/usr/bin
-ENV CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
-
-RUN apt-get update && apt-get install -y \
-    chromium \
-    fonts-liberation \
-    libappindicator3-1 \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libcups2 \
-    libdbus-1-3 \
-    libgdk-pixbuf2.0-0 \
-    libnspr4 \
-    libnss3 \
-    libx11-xcb1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    xdg-utils \
-    --no-install-recommends \
-  && rm -rf /var/lib/apt/lists/*
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 COPY package*.json ./
 RUN npm ci
+RUN npx playwright install chromium --with-deps
 
 COPY . .
 RUN mkdir -p /tmp/uploads /tmp/output

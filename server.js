@@ -21,7 +21,6 @@ const RATE_LIMIT_MS = Number(process.env.RATE_LIMIT_MS || 3000);
 const MEMBER_TIMEOUT_MS = Number(process.env.MEMBER_TIMEOUT_MS || 60000);
 const CONCURRENCY = Number(process.env.CONCURRENCY || 5);
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
-const SYSTEM_CHROMIUM_PATH = process.env.CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium";
 const COMMON_CARD_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".webp"];
 
 const uploads = new Map();
@@ -126,8 +125,9 @@ app.post("/api/process", async (req, res) => {
     endRow: range.endRow,
     zipPath: path.join(ZIP_DIR, `${jobId}.zip`),
     outputPath: OUTPUT_DIR,
-    failedPath: path.join(OUTPUT_DIR, "failed.txt"),
+    failedPath: path.join(ZIP_DIR, `${jobId}-failed.txt`),
     progressPath: path.join(OUTPUT_DIR, "progress.json"),
+    outputFiles: [],
     _failedWriteQueue: Promise.resolve(),
     _progressWriteQueue: Promise.resolve(),
     _lastProgressSaved: 0,
@@ -267,11 +267,13 @@ async function runJob(job, meta, emailIndex, passwordIndex) {
         const existingFile = await findExistingCardFile(job.outputPath, member.email);
         if (existingFile) {
           job.alreadyDone += 1;
+          job.outputFiles.push(existingFile);
           return;
         }
 
         usedBrowser = true;
-        await processMemberWithRetries(member, job.outputPath);
+        const savedFile = await processMemberWithRetries(member, job.outputPath);
+        job.outputFiles.push(savedFile);
         job.success += 1;
       } catch (error) {
         await recordFailure(job, member.email || `row-${member.rowNumber}`, error.message);
@@ -296,7 +298,7 @@ async function runJob(job, meta, emailIndex, passwordIndex) {
   job.status = "zipping";
   job.message = "Creating ZIP...";
   await saveProgress(job, true);
-  await zipFolder(job.outputPath, job.zipPath);
+  await zipFiles(job.outputFiles, job.failedPath, job.zipPath);
   job.status = "completed";
   job.message = `Completed ${job.total} members. ${job.alreadyDone} already done, ${job.success} downloaded, ${job.failed} failed.`;
   job.downloadUrl = `/download/${job.id}`;
@@ -309,8 +311,7 @@ async function processMemberWithRetries(member, outputPath) {
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
     try {
-      await processMember(member.email, member.password, outputPath, member.rowNumber);
-      return;
+      return await processMember(member.email, member.password, outputPath, member.rowNumber);
     } catch (error) {
       lastError = error;
       if (attempt < MAX_RETRIES) {
@@ -371,7 +372,7 @@ async function processMember(email, password, outputPath, rowNumber) {
     }
 
     await waitForCardModal(page);
-    await downloadIdCard(page, email, outputPath, rowNumber);
+    return await downloadIdCard(page, email, outputPath, rowNumber);
   } finally {
     clearTimeout(timeout);
     if (context) {
@@ -435,9 +436,11 @@ async function downloadIdCard(page, email, outputDir, rowNumber) {
     page.waitForEvent("download", { timeout: MEMBER_TIMEOUT_MS }),
     page.click(downloadButtonSelector),
   ]);
-  const ext = path.extname(download.suggestedFilename()) || ".png";
+  const ext = path.extname(download.suggestedFilename()) || ".pdf";
   const fileName = `${safeFileName(email) || `row-${rowNumber}`}${ext}`;
-  await download.saveAs(path.join(outputDir, fileName));
+  const filePath = path.join(outputDir, fileName);
+  await download.saveAs(filePath);
+  return filePath;
 }
 
 async function visibleText(page, pattern) {
@@ -459,7 +462,7 @@ async function visibleText(page, pattern) {
   }, pattern.source);
 }
 
-function zipFolder(sourceDir, destinationPath) {
+function zipFiles(filePaths, failedPath, destinationPath) {
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(destinationPath);
     const archive = archiver("zip", { zlib: { level: 9 } });
@@ -467,11 +470,17 @@ function zipFolder(sourceDir, destinationPath) {
     output.on("close", resolve);
     archive.on("error", reject);
     archive.pipe(output);
-    archive.glob("**/*", {
-      cwd: sourceDir,
-      dot: true,
-      ignore: ["_zips/**", "*.zip"],
-    });
+
+    for (const filePath of [...new Set(filePaths)]) {
+      if (filePath && fs.existsSync(filePath)) {
+        archive.file(filePath, { name: path.basename(filePath) });
+      }
+    }
+
+    if (failedPath && fs.existsSync(failedPath) && fs.statSync(failedPath).size > 0) {
+      archive.file(failedPath, { name: "failed.txt" });
+    }
+
     archive.finalize();
   });
 }
@@ -479,14 +488,33 @@ function zipFolder(sourceDir, destinationPath) {
 function getChromiumLaunchOptions() {
   const launchOptions = {
     headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--no-zygote",
+      "--single-process",
+    ],
   };
+  const chromiumPath = findChromiumExecutable();
 
-  if (fs.existsSync(SYSTEM_CHROMIUM_PATH)) {
-    launchOptions.executablePath = SYSTEM_CHROMIUM_PATH;
+  if (chromiumPath) {
+    launchOptions.executablePath = chromiumPath;
   }
 
   return launchOptions;
+}
+
+function findChromiumExecutable() {
+  const candidates = [
+    process.env.PLAYWRIGHT_CHROMIUM_PATH,
+    process.env.CHROMIUM_EXECUTABLE_PATH,
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ].filter(Boolean);
+
+  return candidates.find((candidate) => fs.existsSync(candidate));
 }
 
 async function findExistingCardFile(outputPath, email) {
