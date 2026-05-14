@@ -199,8 +199,8 @@
               <select id="emailColumn" required></select>
             </div>
             <div>
-              <label for="passwordColumn">Select Password Column</label>
-              <select id="passwordColumn" required></select>
+              <label for="sharedPassword">Shared Password</label>
+              <input id="sharedPassword" type="text" autocomplete="off" required />
             </div>
             <div>
               <label for="startRow">Start Row</label>
@@ -257,7 +257,7 @@
       const mappingPanel = document.getElementById("mappingPanel");
       const progressPanel = document.getElementById("progressPanel");
       const emailColumn = document.getElementById("emailColumn");
-      const passwordColumn = document.getElementById("passwordColumn");
+      const sharedPassword = document.getElementById("sharedPassword");
       const startRow = document.getElementById("startRow");
       const endRow = document.getElementById("endRow");
       const rangeSummary = document.getElementById("rangeSummary");
@@ -319,7 +319,7 @@
             body: JSON.stringify({
               uploadId,
               emailColumnIndex: emailColumn.value,
-              passwordColumnIndex: passwordColumn.value,
+              sharedPassword: sharedPassword.value,
               startRow: startRow.value,
               endRow: endRow.value,
             }),
@@ -336,19 +336,14 @@
 
       function renderColumnOptions(headers) {
         emailColumn.innerHTML = "";
-        passwordColumn.innerHTML = "";
 
         for (const header of headers) {
           const emailOption = new Option(header.name, header.index);
-          const passwordOption = new Option(header.name, header.index);
           emailColumn.add(emailOption);
-          passwordColumn.add(passwordOption);
         }
 
         const guessedEmail = headers.find((header) => /email|phone|member|username/i.test(header.name));
-        const guessedPassword = headers.find((header) => /password|pass|pin/i.test(header.name));
         if (guessedEmail) emailColumn.value = guessedEmail.index;
-        if (guessedPassword) passwordColumn.value = guessedPassword.index;
       }
 
       startRow.addEventListener("input", updateRangeSummary);
@@ -436,6 +431,7 @@
         downloadWrap.classList.add("hidden");
         runError.classList.add("hidden");
         progressBar.value = 0;
+        sharedPassword.value = "";
         successCount.textContent = "0";
         alreadyDoneCount.textContent = "0";
         failedCount.textContent = "0";

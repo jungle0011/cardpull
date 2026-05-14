@@ -46,6 +46,10 @@ const upload = multer({
 app.use(express.json());
 app.use(express.static(path.join(ROOT_DIR, "public")));
 
+app.get("/health", (_req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
 app.post("/api/upload", upload.single("spreadsheet"), async (req, res) => {
   try {
     if (!req.file) {
@@ -79,7 +83,7 @@ app.post("/api/upload", upload.single("spreadsheet"), async (req, res) => {
 });
 
 app.post("/api/process", async (req, res) => {
-  const { uploadId, emailColumnIndex, passwordColumnIndex, startRow, endRow } = req.body;
+  const { uploadId, emailColumnIndex, sharedPassword, startRow, endRow } = req.body;
   const meta = uploads.get(uploadId);
 
   if (!meta) {
@@ -87,15 +91,15 @@ app.post("/api/process", async (req, res) => {
   }
 
   const emailIndex = Number(emailColumnIndex);
-  const passwordIndex = Number(passwordColumnIndex);
+  const password = normalizeCell(sharedPassword);
   const validIndexes = new Set(meta.headers.map((header) => header.index));
 
-  if (!validIndexes.has(emailIndex) || !validIndexes.has(passwordIndex)) {
-    return res.status(400).json({ error: "Choose valid email and password columns." });
+  if (!validIndexes.has(emailIndex)) {
+    return res.status(400).json({ error: "Choose a valid email column." });
   }
 
-  if (emailIndex === passwordIndex) {
-    return res.status(400).json({ error: "Email and password columns must be different." });
+  if (!password) {
+    return res.status(400).json({ error: "Enter the shared password." });
   }
 
   const range = parseRowRange(startRow, endRow, meta.rowCount);
@@ -134,7 +138,7 @@ app.post("/api/process", async (req, res) => {
   };
 
   jobs.set(jobId, job);
-  runJob(job, meta, emailIndex, passwordIndex).catch((error) => {
+  runJob(job, meta, emailIndex, password).catch((error) => {
     job.status = "failed";
     job.error = error.message;
     job.message = "Run failed.";
@@ -234,7 +238,7 @@ function parseRowRange(startRowValue, endRowValue, rowCount) {
   return { ok: true, startRow, endRow };
 }
 
-async function runJob(job, meta, emailIndex, passwordIndex) {
+async function runJob(job, meta, emailIndex, sharedPassword) {
   await fsp.mkdir(job.outputPath, { recursive: true });
   await fsp.mkdir(ZIP_DIR, { recursive: true });
 
@@ -243,7 +247,7 @@ async function runJob(job, meta, emailIndex, passwordIndex) {
   const members = selectedRows.map((row, index) => ({
     rowNumber: job.startRow + index + 1,
     email: normalizeCell(row[emailIndex]),
-    password: normalizeCell(row[passwordIndex]),
+    password: sharedPassword,
   }));
 
   job.total = members.length;
