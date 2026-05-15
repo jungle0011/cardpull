@@ -11,6 +11,7 @@ const LOGIN_URL = "https://api.pdpnigeria.org/api/auth/login";
 const ME_URL = "https://api.pdpnigeria.org/api/auth/me";
 const OUTPUT_DIR = path.join(__dirname, "output");
 const FAILED_PATH = path.join(OUTPUT_DIR, "failed.txt");
+const RATE_LIMITED_PATH = path.join(OUTPUT_DIR, "rate-limited.txt");
 const SKIPPED_PATH = path.join(OUTPUT_DIR, "api-mode-skipped.txt");
 const REQUEST_RETRIES = 10;
 let requestSpacingMs = 500;
@@ -60,6 +61,7 @@ async function main() {
   let completed = 0;
   let saved = 0;
   let failed = 0;
+  let rateLimited = 0;
   const limit = pLimit(concurrency);
 
   const tasks = pending.map((phone) =>
@@ -71,10 +73,16 @@ async function main() {
         saved += 1;
         console.log(`[${completed + 1}/${pending.length}] saved ${phone}.pdf`);
       } catch (error) {
-        failed += 1;
         const reason = cleanReason(error.message || String(error));
-        await fsp.appendFile(FAILED_PATH, `${new Date().toISOString()}\t${phone}\t${reason}\n`, "utf8");
-        console.log(`[${completed + 1}/${pending.length}] failed ${phone}: ${reason}`);
+        if (isRateLimitReason(reason)) {
+          rateLimited += 1;
+          await fsp.appendFile(RATE_LIMITED_PATH, `${new Date().toISOString()}\t${phone}\t${reason}\n`, "utf8");
+          console.log(`[${completed + 1}/${pending.length}] rate-limited ${phone}: rerun will retry`);
+        } else {
+          failed += 1;
+          await fsp.appendFile(FAILED_PATH, `${new Date().toISOString()}\t${phone}\t${reason}\n`, "utf8");
+          console.log(`[${completed + 1}/${pending.length}] failed ${phone}: ${reason}`);
+        }
       } finally {
         completed += 1;
       }
@@ -87,6 +95,7 @@ async function main() {
   console.log("API mode complete.");
   console.log(`Saved: ${saved}`);
   console.log(`Failed: ${failed}`);
+  console.log(`Rate limited, retry on rerun: ${rateLimited}`);
   console.log(`Already done: ${alreadyDone}`);
   console.log(`Output: ${OUTPUT_DIR}`);
 }
@@ -262,9 +271,14 @@ async function fetchMember(phone, password) {
     throw new Error(loginJson?.message || loginJson?.error || `Login failed with HTTP ${loginResponse.status}`);
   }
 
+  const loginMember = extractMember(loginJson);
+  if (loginMember) {
+    return { ...loginMember, loginPhone: phone };
+  }
+
   const token = extractToken(loginJson);
   if (!token) {
-    throw new Error("Login succeeded but no auth token was returned.");
+    throw new Error("Login succeeded but no member data or auth token was returned.");
   }
 
   const profileResponse = await fetchWithRetry(ME_URL, {
@@ -280,7 +294,7 @@ async function fetchMember(phone, password) {
     throw new Error(profileJson?.message || profileJson?.error || `Profile failed with HTTP ${profileResponse.status}`);
   }
 
-  const member = profileJson?.member || profileJson?.data?.member || profileJson?.data || profileJson;
+  const member = extractMember(profileJson);
   if (!member || typeof member !== "object") {
     throw new Error("Profile response did not include member data.");
   }
@@ -326,11 +340,15 @@ function delay(ms) {
 }
 
 async function waitForRequestSlot() {
+  const now = Date.now();
+  const rateLimitWaitMs = Math.max(0, rateLimitedUntil - now);
   if (requestSpacingMs <= 0) {
+    if (rateLimitWaitMs > 0) {
+      await delay(rateLimitWaitMs);
+    }
     return;
   }
 
-  const now = Date.now();
   const waitMs = Math.max(0, nextRequestAt - now, rateLimitedUntil - now);
   nextRequestAt = Math.max(now, nextRequestAt, rateLimitedUntil) + requestSpacingMs;
   if (waitMs > 0) {
@@ -353,6 +371,36 @@ function extractToken(json) {
     || json?.data?.token
     || json?.data?.access_token
     || json?.data?.accessToken;
+}
+
+function extractMember(json) {
+  const candidates = [
+    json?.member,
+    json?.data?.member,
+    json?.data?.user,
+    json?.user,
+    json?.data,
+    json,
+  ];
+  return candidates.find(isMemberLike);
+}
+
+function isMemberLike(candidate) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    return false;
+  }
+  return Boolean(
+    candidate.membershipId
+      || candidate.passportPhoto
+      || candidate.firstName
+      || candidate.lastName
+      || candidate.stateOrigin
+      || candidate.pollingUnit
+  );
+}
+
+function isRateLimitReason(reason) {
+  return /HTTP 429|rate limit|too many requests/i.test(reason);
 }
 
 async function createMemberCardPdf(member, outputPath) {
