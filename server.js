@@ -1004,24 +1004,8 @@ function getChromiumLaunchOptions() {
     headless: true,
     args,
   };
-  const chromiumPath = findChromiumExecutable();
-
-  if (chromiumPath) {
-    launchOptions.executablePath = chromiumPath;
-  }
 
   return launchOptions;
-}
-
-function findChromiumExecutable() {
-  const candidates = [
-    process.env.PLAYWRIGHT_CHROMIUM_PATH,
-    process.env.CHROMIUM_EXECUTABLE_PATH,
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-  ].filter(Boolean);
-
-  return candidates.find((candidate) => fs.existsSync(candidate));
 }
 
 async function findExistingCardFile(outputPath, email) {
