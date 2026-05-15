@@ -215,7 +215,7 @@ app.post("/api/process", async (req, res) => {
     duplexPrintUrl: null,
     outputPath: OUTPUT_DIR,
     failedPath: path.join(ZIP_DIR, `${jobId}-failed.txt`),
-    skippedPath: path.join(ZIP_DIR, `${jobId}-skipped.txt`),
+    skippedPath: path.join(OUTPUT_DIR, "skipped.txt"),
     progressPath: path.join(OUTPUT_DIR, "progress.json"),
     outputFiles: [],
     failedList: [],
@@ -1336,6 +1336,7 @@ function normalizeCell(value) {
 function clearOutputFolder() {
   fs.rmSync(OUTPUT_DIR, { recursive: true, force: true });
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  fs.mkdirSync(ZIP_DIR, { recursive: true });
 }
 
 function delay(ms) {
