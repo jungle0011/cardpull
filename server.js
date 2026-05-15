@@ -13,15 +13,20 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const LOGIN_URL = "https://pdpnigeria.org/login";
+const CONNECTIVITY_URL = "https://pdpnigeria.org";
 const ROOT_DIR = __dirname;
 const IS_RENDER = Boolean(process.env.RENDER);
 const UPLOAD_DIR = process.env.UPLOAD_DIR || (IS_RENDER ? "/tmp/uploads" : path.join(ROOT_DIR, "uploads"));
 const OUTPUT_DIR = process.env.OUTPUT_DIR || (IS_RENDER ? "/tmp/output" : path.join(ROOT_DIR, "output"));
 const ZIP_DIR = path.join(OUTPUT_DIR, "_zips");
 const RATE_LIMIT_MS = Number(process.env.RATE_LIMIT_MS || 3000);
-const MEMBER_TIMEOUT_MS = Number(process.env.MEMBER_TIMEOUT_MS || 60000);
-const DEFAULT_CONCURRENCY = clampNumber(Number(process.env.CONCURRENCY || 8), 3, 10);
-const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
+const MEMBER_TIMEOUT_MS = Number(process.env.MEMBER_TIMEOUT_MS || 120000);
+const MAX_TIMEOUT_RETRIES = 2;
+const RETRY_DELAY_MS = 5000;
+const WORKER_STAGGER_MS = 500;
+const CONNECTIVITY_TIMEOUT_MS = 10000;
+const NETWORK_PAUSE_THRESHOLD = 10;
+const DEFAULT_CONCURRENCY = clampNumber(Number(process.env.CONCURRENCY || 8), 3, 25);
 const COMMON_CARD_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".webp"];
 const PRINT_READY_FILE_NAME = "all-cards-print-ready.pdf";
 const DUPLEX_PRINT_FILE_NAME = "duplex-print-ready.pdf";
@@ -54,6 +59,16 @@ app.use(express.static(path.join(ROOT_DIR, "public")));
 
 app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok" });
+});
+
+app.post("/api/clear-output", async (_req, res) => {
+  try {
+    await clearOutputFolder();
+    jobs.clear();
+    res.json({ message: "Output cleared, ready for fresh run" });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Could not clear output." });
+  }
 });
 
 app.post("/api/upload", upload.array("spreadsheet"), async (req, res) => {
@@ -176,6 +191,13 @@ app.post("/api/process", async (req, res) => {
     return res.status(400).json({ error: requestedConcurrency.error });
   }
 
+  const connectivity = await checkSiteConnectivity();
+  if (!connectivity.ok) {
+    return res.status(400).json({
+      error: "Cannot reach pdpnigeria.org - check your internet connection before starting",
+    });
+  }
+
   const rangeTotal = prepared.members.length;
   const jobId = crypto.randomUUID();
   const job = {
@@ -208,6 +230,14 @@ app.post("/api/process", async (req, res) => {
     progressPath: path.join(OUTPUT_DIR, "progress.json"),
     outputFiles: [],
     failedList: [],
+    networkRetryQueue: [],
+    networkRetryList: [],
+    networkRetrySet: new Set(),
+    networkErrors: 0,
+    consecutiveNetworkErrors: 0,
+    pausedReason: null,
+    _resumeWaiters: [],
+    _statusBeforePause: null,
     _failedWriteQueue: Promise.resolve(),
     _progressWriteQueue: Promise.resolve(),
     _lastProgressSaved: 0,
@@ -222,6 +252,21 @@ app.post("/api/process", async (req, res) => {
   });
 
   res.json({ jobId });
+});
+
+app.post("/api/jobs/:jobId/resume", async (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Job not found." });
+  }
+
+  if (job.status !== "paused") {
+    return res.json(publicJob(job));
+  }
+
+  resumeJob(job);
+  await saveProgress(job, true);
+  res.json(publicJob(job));
 });
 
 app.get("/api/jobs/:jobId", (req, res) => {
@@ -395,8 +440,8 @@ function parseConcurrency(value) {
     ? DEFAULT_CONCURRENCY
     : Number.parseInt(String(value), 10);
 
-  if (!Number.isInteger(parsed) || parsed < 3 || parsed > 10) {
-    return { ok: false, error: "Speed must be between 3 and 10 parallel downloads." };
+  if (!Number.isInteger(parsed) || parsed < 3 || parsed > 25) {
+    return { ok: false, error: "Speed must be between 3 and 25 parallel downloads." };
   }
 
   return { ok: true, value: parsed };
@@ -415,14 +460,17 @@ async function runJob(job) {
   await saveProgress(job, true);
 
   const limit = pLimit(job.concurrency);
-  const tasks = members.map((member) =>
+  const tasks = members.map((member, index) =>
     limit(async () => {
       let usedBrowser = false;
 
       try {
+        await waitIfPaused(job);
+
         if (!member.email || !member.password) {
           await recordFailure(job, member.email || `row-${member.rowNumber}`, "Missing email or password.");
           job.failed += 1;
+          job.consecutiveNetworkErrors = 0;
           return;
         }
 
@@ -430,16 +478,24 @@ async function runJob(job) {
         if (existingFile) {
           job.alreadyDone += 1;
           member.outputFile = existingFile;
+          job.consecutiveNetworkErrors = 0;
           return;
         }
 
         usedBrowser = true;
+        await delay((index % job.concurrency) * WORKER_STAGGER_MS);
         const savedFile = await processMemberWithRetries(member, job.outputPath);
         member.outputFile = savedFile;
         job.success += 1;
+        job.consecutiveNetworkErrors = 0;
       } catch (error) {
-        await recordFailure(job, member.email || `row-${member.rowNumber}`, error.message);
-        job.failed += 1;
+        if (isNetworkError(error)) {
+          await recordNetworkError(job, member, error);
+        } else {
+          await recordFailure(job, member.email || `row-${member.rowNumber}`, error.message);
+          job.failed += 1;
+          job.consecutiveNetworkErrors = 0;
+        }
       } finally {
         job.current += 1;
         job.remaining = Math.max(job.total - job.current, 0);
@@ -454,6 +510,7 @@ async function runJob(job) {
   );
 
   await Promise.all(tasks);
+  await processNetworkRetryQueue(job);
   job.outputFiles = members.map((member) => member.outputFile).filter(Boolean);
   await Promise.all([job._failedWriteQueue, job._progressWriteQueue]);
   await saveProgress(job, true);
@@ -475,32 +532,212 @@ async function runJob(job) {
     job.zipPath
   );
   job.status = "completed";
-  job.message = `Completed ${job.total} members. ${job.alreadyDone} already done, ${job.success} downloaded, ${job.failed} failed.`;
+  job.message = `Completed ${job.total} members. ${job.alreadyDone} already done, ${job.success} downloaded, ${job.failed} failed, ${job.networkErrors || 0} network error(s).`;
   job.downloadUrl = `/download/${job.id}`;
   job.finishedAt = new Date().toISOString();
   await saveProgress(job, true);
 }
 
+async function processNetworkRetryQueue(job) {
+  const retryMembers = [...job.networkRetryQueue];
+  if (retryMembers.length === 0) {
+    return;
+  }
+
+  job.status = "network-retry";
+  job.message = `Retrying ${retryMembers.length} network error(s) now that the main run is complete...`;
+  await saveProgress(job, true);
+  await waitForConnectivityOrPause(job);
+
+  job.networkRetryQueue = [];
+  job.networkRetrySet.clear();
+  job.networkRetryList = [];
+  job.networkErrors = 0;
+
+  const limit = pLimit(job.concurrency);
+  const tasks = retryMembers.map((member, index) =>
+    limit(async () => {
+      await waitIfPaused(job);
+      await delay((index % job.concurrency) * WORKER_STAGGER_MS);
+
+      try {
+        const existingFile = await findExistingCardFile(job.outputPath, member.email);
+        if (existingFile) {
+          member.outputFile = existingFile;
+          job.alreadyDone += 1;
+          job.consecutiveNetworkErrors = 0;
+          return;
+        }
+
+        const savedFile = await processMemberWithRetries(member, job.outputPath);
+        member.outputFile = savedFile;
+        job.success += 1;
+        job.consecutiveNetworkErrors = 0;
+      } catch (error) {
+        if (isNetworkError(error)) {
+          await recordNetworkError(job, member, error, { retryAgain: false });
+        } else {
+          await recordFailure(job, member.email || `row-${member.rowNumber}`, error.message);
+          job.failed += 1;
+          job.consecutiveNetworkErrors = 0;
+        }
+      } finally {
+        updateJobMessage(job);
+        await saveProgress(job);
+        await delay(RATE_LIMIT_MS);
+      }
+    })
+  );
+
+  await Promise.all(tasks);
+}
+
 async function processMemberWithRetries(member, outputPath) {
   let lastError;
 
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
+  for (let attempt = 1; attempt <= MAX_TIMEOUT_RETRIES + 1; attempt += 1) {
     try {
       return await processMember(member.email, member.password, outputPath, member.rowNumber);
     } catch (error) {
       lastError = error;
-      if (attempt < MAX_RETRIES) {
-        await delay(1000 * attempt);
+
+      if (!shouldRetryMemberError(error) || attempt > MAX_TIMEOUT_RETRIES) {
+        throw error;
       }
+
+      await delay(RETRY_DELAY_MS);
     }
   }
 
-  throw new Error(`Failed after ${MAX_RETRIES} attempts: ${lastError.message}`);
+  throw lastError;
+}
+
+function shouldRetryMemberError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  const isTimeout = message.includes("timeout") || message.includes("timed out");
+  const isPermanentFailure = /invalid|incorrect|unauthorized|not found/.test(message);
+
+  return isTimeout && !isPermanentFailure;
+}
+
+function isNetworkError(error) {
+  const message = String(error?.message || error || "").toUpperCase();
+  return (
+    message.includes("ERR_CONNECTION") ||
+    message.includes("ERR_SOCKET") ||
+    message.includes("TIMED_OUT") ||
+    message.includes("NET::") ||
+    message.includes("ECONNREFUSED") ||
+    message.includes("ENOTFOUND")
+  );
+}
+
+async function recordNetworkError(job, member, error, options = {}) {
+  const { retryAgain = true } = options;
+  const email = member.email || `row-${member.rowNumber}`;
+  const reason = String(error?.message || error || "Network error").replace(/\s+/g, " ").trim();
+
+  await deleteMemberOutputFiles(job.outputPath, email);
+
+  if (retryAgain && !job.networkRetrySet.has(email)) {
+    job.networkRetrySet.add(email);
+    job.networkRetryQueue.push(member);
+    job.networkRetryList.push({ email, reason });
+  } else if (!retryAgain) {
+    job.networkRetryList.push({ email, reason });
+  }
+
+  job.networkErrors = job.networkRetryList.length;
+  job.consecutiveNetworkErrors += 1;
+
+  if (job.consecutiveNetworkErrors >= NETWORK_PAUSE_THRESHOLD) {
+    await pauseJob(job);
+  }
+}
+
+async function deleteMemberOutputFiles(outputPath, email) {
+  const baseName = safeFileName(email);
+  if (!baseName) {
+    return;
+  }
+
+  await Promise.all(
+    COMMON_CARD_EXTENSIONS.map((ext) =>
+      fsp.rm(path.join(outputPath, `${baseName}${ext}`), { force: true }).catch(() => {})
+    )
+  );
+}
+
+async function pauseJob(job) {
+  if (job.status === "paused") {
+    return;
+  }
+
+  job._statusBeforePause = job.status === "network-retry" ? "network-retry" : "running";
+  job.status = "paused";
+  job.pausedReason = "Network issues detected, job paused. Check connection then click Resume";
+  job.message = job.pausedReason;
+  await saveProgress(job, true);
+}
+
+function resumeJob(job) {
+  const waiters = job._resumeWaiters.splice(0);
+  job.status = job._statusBeforePause || "running";
+  job._statusBeforePause = null;
+  job.pausedReason = null;
+  job.consecutiveNetworkErrors = 0;
+
+  if (job.status === "network-retry") {
+    job.message = `Retrying ${job.networkRetryQueue.length || job.networkErrors} network error(s)...`;
+  } else {
+    updateJobMessage(job);
+  }
+
+  waiters.forEach((resolve) => resolve());
+}
+
+async function waitIfPaused(job) {
+  while (job.status === "paused") {
+    await new Promise((resolve) => {
+      job._resumeWaiters.push(resolve);
+    });
+  }
+}
+
+async function waitForConnectivityOrPause(job) {
+  while (true) {
+    const connectivity = await checkSiteConnectivity();
+    if (connectivity.ok) {
+      return;
+    }
+
+    await pauseJob(job);
+    await waitIfPaused(job);
+  }
+}
+
+async function checkSiteConnectivity() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CONNECTIVITY_TIMEOUT_MS);
+
+  try {
+    await fetch(CONNECTIVITY_URL, {
+      method: "GET",
+      signal: controller.signal,
+      redirect: "follow",
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function processMember(email, password, outputPath, rowNumber) {
   let browser;
   let context;
+  let phase = "starting browser";
   let timedOut = false;
   const timeout = setTimeout(() => {
     timedOut = true;
@@ -514,6 +751,7 @@ async function processMember(email, password, outputPath, rowNumber) {
 
   try {
     browser = await chromium.launch(getChromiumLaunchOptions());
+    phase = "creating browser context";
     context = await browser.newContext({
       viewport: { width: 1440, height: 1100 },
       acceptDownloads: true,
@@ -521,10 +759,14 @@ async function processMember(email, password, outputPath, rowNumber) {
     const page = await context.newPage();
     page.setDefaultTimeout(MEMBER_TIMEOUT_MS);
 
+    phase = "opening login page";
     await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: MEMBER_TIMEOUT_MS });
+    phase = "filling login form";
     await fillLoginForm(page, email, password);
+    phase = "submitting login";
     await clickLogin(page);
 
+    phase = "waiting for dashboard ID card button";
     const idCardButton = page
       .getByRole("button", { name: /generate\s*\/?\s*download membership id card/i })
       .first();
@@ -541,12 +783,16 @@ async function processMember(email, password, outputPath, rowNumber) {
     });
 
     if (await idCardButton.isVisible().catch(() => false)) {
+      phase = "clicking dashboard ID card button";
       await idCardButton.click();
     } else {
+      phase = "clicking fallback dashboard ID card button";
       await fallbackIdCardButton.click();
     }
 
+    phase = "waiting for card modal";
     await waitForCardModal(page);
+    phase = "downloading ID card";
     return await downloadIdCard(page, email, outputPath, rowNumber);
   } finally {
     clearTimeout(timeout);
@@ -557,7 +803,7 @@ async function processMember(email, password, outputPath, rowNumber) {
       await browser.close().catch(() => {});
     }
     if (timedOut) {
-      throw new Error(`Member timed out after ${MEMBER_TIMEOUT_MS / 1000} seconds.`);
+      throw new Error(`Member timed out after ${MEMBER_TIMEOUT_MS / 1000} seconds while ${phase}.`);
     }
   }
 }
@@ -746,16 +992,17 @@ function drawCardSlot(page, embeddedPage, slot) {
 }
 
 function getChromiumLaunchOptions() {
+  const args = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-zygote",
+  ];
+
   const launchOptions = {
     headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--no-zygote",
-      "--single-process",
-    ],
+    args,
   };
   const chromiumPath = findChromiumExecutable();
 
@@ -834,7 +1081,8 @@ async function saveProgress(job, force = false) {
 }
 
 function updateJobMessage(job) {
-  job.message = `${job.alreadyDone} already done, processing remaining ${job.remaining}... Processing ${job.current} of ${job.total}.`;
+  const networkText = job.networkErrors ? ` Network errors queued: ${job.networkErrors}.` : "";
+  job.message = `${job.alreadyDone} already done, processing remaining ${job.remaining}... Processing ${job.current} of ${job.total}.${networkText}`;
 }
 
 function publicJob(job) {
@@ -854,6 +1102,9 @@ function publicJob(job) {
     fileRanges: job.fileRanges,
     parseWarnings: job.parseWarnings,
     failedList: job.failedList,
+    networkErrors: job.networkErrors || 0,
+    networkRetryList: job.networkRetryList || [],
+    pausedReason: job.pausedReason,
     message: job.message,
     downloadUrl: job.downloadUrl,
     printReadyUrl: job.printReadyUrl,
@@ -910,6 +1161,22 @@ function clampNumber(value, min, max) {
 
 function normalizeCell(value) {
   return String(value ?? "").trim();
+}
+
+async function clearOutputFolder() {
+  await fsp.mkdir(OUTPUT_DIR, { recursive: true });
+
+  const entries = await fsp.readdir(OUTPUT_DIR, { withFileTypes: true });
+  await Promise.all(
+    entries.map((entry) =>
+      fsp.rm(path.join(OUTPUT_DIR, entry.name), {
+        recursive: true,
+        force: true,
+      })
+    )
+  );
+
+  await fsp.mkdir(ZIP_DIR, { recursive: true });
 }
 
 function delay(ms) {

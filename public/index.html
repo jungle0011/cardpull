@@ -99,6 +99,14 @@
         background: var(--green-dark);
       }
 
+      button.danger {
+        background: var(--red);
+      }
+
+      button.danger:hover {
+        background: #7a1a12;
+      }
+
       button:disabled {
         cursor: not-allowed;
         opacity: 0.55;
@@ -194,6 +202,13 @@
         <p id="uploadStatus" class="status hidden"></p>
       </section>
 
+      <section class="panel">
+        <div class="row">
+          <button id="clearOutputButton" class="danger" type="button">Clear All & Start Fresh</button>
+        </div>
+        <p id="clearOutputStatus" class="status hidden"></p>
+      </section>
+
       <section id="mappingPanel" class="panel hidden">
         <form id="mappingForm">
           <div class="grid">
@@ -207,7 +222,8 @@
             </div>
             <div>
               <label for="concurrencyInput">Speed (parallel downloads)</label>
-              <input id="concurrencyInput" type="number" min="3" max="10" step="1" value="8" required />
+              <input id="concurrencyInput" type="number" min="3" max="25" step="1" value="8" required />
+              <p style="margin-top: 6px; font-size: 13px">Running on GitHub Codespaces? Set speed to 20-25 for best performance.</p>
             </div>
           </div>
           <div id="fileRanges" style="margin-top: 16px"></div>
@@ -237,9 +253,17 @@
             <span>Failed logins</span>
           </div>
           <div class="stat">
+            <strong id="networkErrorCount">0</strong>
+            <span>Network errors (will retry)</span>
+          </div>
+          <div class="stat">
             <strong id="statusText">Idle</strong>
             <span>Status</span>
           </div>
+        </div>
+        <div id="resumeWrap" class="status hidden">
+          <p id="pauseMessage">Network issues detected, job paused. Check connection then click Resume</p>
+          <button id="resumeButton" type="button">Resume</button>
         </div>
         <div id="downloadWrap" class="row hidden" style="margin-top: 16px">
           <a id="downloadLink" class="download" href="#">Download All (ZIP)</a>
@@ -261,6 +285,8 @@
       const fileInputs = document.getElementById("fileInputs");
       const addFileInputButton = document.getElementById("addFileInputButton");
       const uploadButton = document.getElementById("uploadButton");
+      const clearOutputButton = document.getElementById("clearOutputButton");
+      const clearOutputStatus = document.getElementById("clearOutputStatus");
       const startButton = document.getElementById("startButton");
       const uploadStatus = document.getElementById("uploadStatus");
       const mappingPanel = document.getElementById("mappingPanel");
@@ -275,7 +301,11 @@
       const successCount = document.getElementById("successCount");
       const alreadyDoneCount = document.getElementById("alreadyDoneCount");
       const failedCount = document.getElementById("failedCount");
+      const networkErrorCount = document.getElementById("networkErrorCount");
       const statusText = document.getElementById("statusText");
+      const resumeWrap = document.getElementById("resumeWrap");
+      const pauseMessage = document.getElementById("pauseMessage");
+      const resumeButton = document.getElementById("resumeButton");
       const downloadWrap = document.getElementById("downloadWrap");
       const downloadLink = document.getElementById("downloadLink");
       const printReadyLink = document.getElementById("printReadyLink");
@@ -287,6 +317,7 @@
 
       let uploadId = null;
       let uploadedFiles = [];
+      let currentJobId = null;
       let pollTimer = null;
       let previewTimer = null;
 
@@ -298,6 +329,30 @@
         input.multiple = true;
         input.style.marginTop = "10px";
         fileInputs.appendChild(input);
+      });
+
+      clearOutputButton.addEventListener("click", async () => {
+        if (!confirm("Delete all saved cards, ZIPs, failed logs, and progress?")) {
+          return;
+        }
+
+        clearOutputButton.disabled = true;
+        clearOutputStatus.className = "status";
+        clearOutputStatus.textContent = "Clearing output...";
+
+        try {
+          const response = await fetch("/api/clear-output", { method: "POST" });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "Could not clear output.");
+          clearProgress();
+          clearOutputStatus.className = "status";
+          clearOutputStatus.textContent = data.message || "Output cleared, ready for fresh run";
+        } catch (error) {
+          clearOutputStatus.className = "status error";
+          clearOutputStatus.textContent = error.message;
+        } finally {
+          clearOutputButton.disabled = false;
+        }
       });
 
       uploadForm.addEventListener("submit", async (event) => {
@@ -353,11 +408,29 @@
           });
           const data = await response.json();
           if (!response.ok) throw new Error(data.error || "Could not start processing.");
+          currentJobId = data.jobId;
           pollJob(data.jobId);
         } catch (error) {
           runError.textContent = error.message;
           runError.classList.remove("hidden");
           startButton.disabled = false;
+        }
+      });
+
+      resumeButton.addEventListener("click", async () => {
+        if (!currentJobId) return;
+
+        resumeButton.disabled = true;
+        try {
+          const response = await fetch(`/api/jobs/${currentJobId}/resume`, { method: "POST" });
+          const job = await response.json();
+          if (!response.ok) throw new Error(job.error || "Could not resume job.");
+          renderJob(job);
+        } catch (error) {
+          runError.textContent = error.message;
+          runError.classList.remove("hidden");
+        } finally {
+          resumeButton.disabled = false;
         }
       });
 
@@ -508,8 +581,16 @@
         successCount.textContent = job.success;
         alreadyDoneCount.textContent = job.alreadyDone || 0;
         failedCount.textContent = job.failed;
+        networkErrorCount.textContent = job.networkErrors || 0;
         statusText.textContent = job.concurrency ? `${job.status} (${job.concurrency}x)` : job.status;
         renderFailedLogins(job.failedList || []);
+
+        if (job.status === "paused") {
+          pauseMessage.textContent = job.pausedReason || "Network issues detected, job paused. Check connection then click Resume";
+          resumeWrap.classList.remove("hidden");
+        } else {
+          resumeWrap.classList.add("hidden");
+        }
 
         if (job.status === "completed") {
           progressText.textContent = job.message;
@@ -560,6 +641,7 @@
         pollTimer = null;
         uploadId = null;
         uploadedFiles = [];
+        currentJobId = null;
         fileRanges.innerHTML = "";
         mappingPanel.classList.add("hidden");
         progressPanel.classList.add("hidden");
@@ -568,6 +650,7 @@
         duplexPrintLink.classList.add("hidden");
         duplexPrintNote.classList.add("hidden");
         failedLoginsPanel.classList.add("hidden");
+        resumeWrap.classList.add("hidden");
         failedLoginsList.innerHTML = "";
         runError.classList.add("hidden");
         progressBar.value = 0;
@@ -576,6 +659,7 @@
         successCount.textContent = "0";
         alreadyDoneCount.textContent = "0";
         failedCount.textContent = "0";
+        networkErrorCount.textContent = "0";
         statusText.textContent = "Idle";
       }
     </script>
