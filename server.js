@@ -387,7 +387,6 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
   );
   const seen = new Set();
   const members = [];
-  let membersBuilt = 0;
   const resolvedRanges = [];
   const warnings = [];
 
@@ -423,7 +422,6 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
         continue;
       }
 
-      membersBuilt += 1;
       if (seen.has(dedupeKey)) {
         continue;
       }
@@ -437,9 +435,6 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
       });
     }
   }
-
-  console.log("Members array built:", membersBuilt);
-  console.log("After dedup:", members.length);
 
   return {
     ok: true,
@@ -468,10 +463,6 @@ async function runJob(job) {
 
   const members = job.preparedMembers;
   job.existingOutputFiles = buildExistingOutputFileSet(job.outputPath);
-  const remainingForLog = members.filter(
-    (member) => !findExistingCardFileFromSet(job.outputPath, job.existingOutputFiles, member.email)
-  );
-  console.log("After skip already-done:", remainingForLog.length);
 
   job.total = members.length;
   job.remaining = members.length;
@@ -480,18 +471,11 @@ async function runJob(job) {
   await saveProgress(job, true);
 
   const limit = pLimit(job.concurrency);
-  let firstTaskLogged = false;
-  console.log("Starting p-limit pool...");
   const tasks = members.map((member, index) =>
     limit(async () => {
       let usedBrowser = false;
 
       try {
-        if (!firstTaskLogged) {
-          firstTaskLogged = true;
-          console.log("First task executing for:", member.email);
-        }
-
         await waitIfPaused(job);
 
         if (!member.email || !member.password) {
