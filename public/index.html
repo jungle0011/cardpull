@@ -239,6 +239,7 @@
         <div style="margin-top: 12px">
           <progress id="progressBar" value="0" max="100"></progress>
         </div>
+        <p id="lastRowText" class="status">Last processed row: 0 of 0</p>
         <div class="stats">
           <div class="stat">
             <strong id="successCount">0</strong>
@@ -264,6 +265,10 @@
         <div id="resumeWrap" class="status hidden">
           <p id="pauseMessage">Network issues detected, job paused. Check connection then click Resume</p>
           <button id="resumeButton" type="button">Resume</button>
+        </div>
+        <div id="jobActionsWrap" class="row hidden" style="margin-top: 16px">
+          <button id="stopButton" class="danger" type="button">Stop Job</button>
+          <a id="currentDuplexLink" class="download" href="#">Download Duplex PDF</a>
         </div>
         <div id="downloadWrap" class="row hidden" style="margin-top: 16px">
           <a id="downloadLink" class="download" href="#">Download All (ZIP)</a>
@@ -298,6 +303,7 @@
       const rangeSummary = document.getElementById("rangeSummary");
       const progressText = document.getElementById("progressText");
       const progressBar = document.getElementById("progressBar");
+      const lastRowText = document.getElementById("lastRowText");
       const successCount = document.getElementById("successCount");
       const alreadyDoneCount = document.getElementById("alreadyDoneCount");
       const failedCount = document.getElementById("failedCount");
@@ -306,6 +312,9 @@
       const resumeWrap = document.getElementById("resumeWrap");
       const pauseMessage = document.getElementById("pauseMessage");
       const resumeButton = document.getElementById("resumeButton");
+      const jobActionsWrap = document.getElementById("jobActionsWrap");
+      const stopButton = document.getElementById("stopButton");
+      const currentDuplexLink = document.getElementById("currentDuplexLink");
       const downloadWrap = document.getElementById("downloadWrap");
       const downloadLink = document.getElementById("downloadLink");
       const printReadyLink = document.getElementById("printReadyLink");
@@ -393,6 +402,7 @@
         progressPanel.classList.remove("hidden");
         runError.classList.add("hidden");
         downloadWrap.classList.add("hidden");
+        jobActionsWrap.classList.add("hidden");
 
         try {
           const response = await fetch("/api/process", {
@@ -431,6 +441,22 @@
           runError.classList.remove("hidden");
         } finally {
           resumeButton.disabled = false;
+        }
+      });
+
+      stopButton.addEventListener("click", async () => {
+        if (!currentJobId || !confirm("Stop this job after the current batch completes?")) return;
+
+        stopButton.disabled = true;
+        try {
+          const response = await fetch(`/api/jobs/${currentJobId}/stop`, { method: "POST" });
+          const job = await response.json();
+          if (!response.ok) throw new Error(job.error || "Could not stop job.");
+          renderJob(job);
+        } catch (error) {
+          runError.textContent = error.message;
+          runError.classList.remove("hidden");
+          stopButton.disabled = false;
         }
       });
 
@@ -553,7 +579,7 @@
             const job = await response.json();
             if (!response.ok) throw new Error(job.error || "Could not read progress.");
             renderJob(job);
-            if (["completed", "failed"].includes(job.status)) {
+            if (["completed", "failed", "stopped"].includes(job.status)) {
               clearInterval(pollTimer);
               pollTimer = null;
               startButton.disabled = false;
@@ -580,6 +606,7 @@
           : job.message;
         progressBar.max = total || 100;
         progressBar.value = total ? current : 0;
+        lastRowText.textContent = `Last processed row: ${job.lastProcessedRow || 0} of ${job.lastProcessedRowTotal || total || 0}`;
         successCount.textContent = job.success;
         alreadyDoneCount.textContent = job.alreadyDone || 0;
         failedCount.textContent = job.failed;
@@ -593,6 +620,14 @@
         } else {
           resumeWrap.classList.add("hidden");
         }
+
+        const canStop = ["preparing", "running", "network-retry", "paused"].includes(job.status);
+        const canDownloadDuplex = currentJobId && (job.success > 0 || job.alreadyDone > 0);
+        stopButton.disabled = job.status === "stopping";
+        currentDuplexLink.href = currentJobId ? `/api/jobs/${currentJobId}/duplex` : "#";
+        jobActionsWrap.classList.toggle("hidden", !canStop && !canDownloadDuplex);
+        stopButton.classList.toggle("hidden", !canStop && job.status !== "stopping");
+        currentDuplexLink.classList.toggle("hidden", !canDownloadDuplex);
 
         if (job.status === "completed") {
           progressText.textContent = job.message;
@@ -612,6 +647,11 @@
             duplexPrintNote.classList.add("hidden");
           }
           downloadWrap.classList.remove("hidden");
+        }
+
+        if (job.status === "stopped") {
+          progressText.textContent = job.message;
+          stopButton.disabled = false;
         }
 
         if (job.status === "failed") {
@@ -648,14 +688,17 @@
         mappingPanel.classList.add("hidden");
         progressPanel.classList.add("hidden");
         downloadWrap.classList.add("hidden");
+        jobActionsWrap.classList.add("hidden");
         printReadyLink.classList.add("hidden");
         duplexPrintLink.classList.add("hidden");
+        currentDuplexLink.classList.add("hidden");
         duplexPrintNote.classList.add("hidden");
         failedLoginsPanel.classList.add("hidden");
         resumeWrap.classList.add("hidden");
         failedLoginsList.innerHTML = "";
         runError.classList.add("hidden");
         progressBar.value = 0;
+        lastRowText.textContent = "Last processed row: 0 of 0";
         sharedPassword.value = "";
         concurrencyInput.value = "8";
         successCount.textContent = "0";

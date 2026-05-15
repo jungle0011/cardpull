@@ -203,6 +203,8 @@ app.post("/api/process", async (req, res) => {
     error: null,
     alreadyDone: 0,
     remaining: 0,
+    lastProcessedRow: 0,
+    lastProcessedRowTotal: 0,
     concurrency: requestedConcurrency.value,
     fileRanges: [],
     fileCount: meta.files.length,
@@ -227,6 +229,7 @@ app.post("/api/process", async (req, res) => {
     networkErrors: 0,
     consecutiveNetworkErrors: 0,
     pausedReason: null,
+    stopRequested: false,
     _resumeWaiters: [],
     _statusBeforePause: null,
     _failedWriteQueue: Promise.resolve(),
@@ -257,6 +260,29 @@ app.post("/api/jobs/:jobId/resume", async (req, res) => {
   }
 
   resumeJob(job);
+  await saveProgress(job, true);
+  res.json(publicJob(job));
+});
+
+app.post("/api/jobs/:jobId/stop", async (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Job not found." });
+  }
+
+  if (["completed", "failed", "stopped"].includes(job.status)) {
+    return res.json(publicJob(job));
+  }
+
+  job.stopRequested = true;
+  job.status = "stopping";
+  job.message = `Stopping job after current batch completes... ${job.current} of ${job.total}.`;
+  if (job._resumeWaiters?.length) {
+    resumeJob(job);
+    job.stopRequested = true;
+    job.status = "stopping";
+    job.message = `Stopping job after current batch completes... ${job.current} of ${job.total}.`;
+  }
   await saveProgress(job, true);
   res.json(publicJob(job));
 });
@@ -295,6 +321,22 @@ app.get("/download/:jobId/duplex-print", (req, res) => {
   }
 
   res.download(job.duplexPrintPath, DUPLEX_PRINT_FILE_NAME);
+});
+
+app.get("/api/jobs/:jobId/duplex", async (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).send("Job not found.");
+  }
+
+  const pdfPaths = currentOutputPdfPaths(job.outputPath);
+  if (pdfPaths.length === 0) {
+    return res.status(404).send("No downloaded PDFs are available yet.");
+  }
+
+  const destinationPath = path.join(ZIP_DIR, `${job.id}-current-duplex.pdf`);
+  await createDuplexPrintPdf(pdfPaths, destinationPath);
+  res.download(destinationPath, `cardpull-${job.id}-duplex.pdf`);
 });
 
 app.use((error, _req, res, _next) => {
@@ -546,7 +588,9 @@ async function yieldDuringPreparation(job, memberCount, skippedCount, rowsParsed
   }
 
   if (job) {
-    job.message = `Preparing ${memberCount} members...`;
+    if (!job.stopRequested) {
+      job.message = `Preparing ${memberCount} members...`;
+    }
     job.total = memberCount;
     job.remaining = memberCount;
     job.skipped = skippedCount;
@@ -592,10 +636,19 @@ async function prepareAndRunJob(job, meta, emailIndex, password, fileRanges) {
   job.remaining = prepared.members.length;
   job.fileRanges = prepared.fileRanges;
   job.fileCount = prepared.fileCount;
+  job.lastProcessedRowTotal = Math.max(0, ...prepared.fileRanges.map((range) => Number(range.endRow) || 0));
   job.parseWarnings = prepared.warnings;
   job.skippedList = prepared.skipped;
   job.skipped = prepared.skipped.length;
   await writeSkippedLog(job, prepared.skipped);
+
+  if (job.stopRequested) {
+    job.status = "stopped";
+    job.message = `Job stopped at ${job.current} of ${job.total} members.`;
+    job.finishedAt = new Date().toISOString();
+    await saveProgress(job, true);
+    return;
+  }
 
   const connectivity = await checkSiteConnectivity();
   if (!connectivity.ok) {
@@ -622,9 +675,14 @@ async function runJob(job) {
   const tasks = members.map((member, index) =>
     limit(async () => {
       let usedBrowser = false;
+      let shouldCount = false;
 
       try {
         await waitIfPaused(job);
+        if (job.stopRequested) {
+          return;
+        }
+        shouldCount = true;
 
         if (!member.email || !member.password) {
           await recordFailure(job, member.email || `row-${member.rowNumber}`, "Missing email or password.");
@@ -657,10 +715,13 @@ async function runJob(job) {
           job.consecutiveNetworkErrors = 0;
         }
       } finally {
-        job.current += 1;
-        job.remaining = Math.max(job.total - job.current, 0);
-        updateJobMessage(job);
-        await saveProgress(job);
+        if (shouldCount) {
+          job.current += 1;
+          job.lastProcessedRow = Math.max(job.lastProcessedRow || 0, member.rowNumber || 0);
+          job.remaining = Math.max(job.total - job.current, 0);
+          updateJobMessage(job);
+          await saveProgress(job);
+        }
 
         if (usedBrowser) {
           await delay(RATE_LIMIT_MS);
@@ -670,7 +731,29 @@ async function runJob(job) {
   );
 
   await Promise.all(tasks);
+  if (job.stopRequested) {
+    job.outputFiles = members.map((member) => member.outputFile).filter(Boolean);
+    await Promise.all([job._failedWriteQueue, job._progressWriteQueue]);
+    job.status = "stopped";
+    job.remaining = Math.max(job.total - job.current, 0);
+    job.message = `Job stopped at ${job.current} of ${job.total} members.`;
+    job.finishedAt = new Date().toISOString();
+    await saveProgress(job, true);
+    return;
+  }
+
   await processNetworkRetryQueue(job);
+  if (job.stopRequested) {
+    job.outputFiles = members.map((member) => member.outputFile).filter(Boolean);
+    await Promise.all([job._failedWriteQueue, job._progressWriteQueue]);
+    job.status = "stopped";
+    job.remaining = Math.max(job.total - job.current, 0);
+    job.message = `Job stopped at ${job.current} of ${job.total} members.`;
+    job.finishedAt = new Date().toISOString();
+    await saveProgress(job, true);
+    return;
+  }
+
   job.outputFiles = members.map((member) => member.outputFile).filter(Boolean);
   await Promise.all([job._failedWriteQueue, job._progressWriteQueue]);
   await saveProgress(job, true);
@@ -719,7 +802,13 @@ async function processNetworkRetryQueue(job) {
   const tasks = retryMembers.map((member, index) =>
     limit(async () => {
       await waitIfPaused(job);
+      if (job.stopRequested) {
+        return;
+      }
       await delay((index % job.concurrency) * WORKER_STAGGER_MS);
+      if (job.stopRequested) {
+        return;
+      }
 
       try {
         const existingFile = findExistingCardFileFromSet(job.outputPath, job.existingOutputFiles, member.email);
@@ -744,6 +833,7 @@ async function processNetworkRetryQueue(job) {
           job.consecutiveNetworkErrors = 0;
         }
       } finally {
+        job.lastProcessedRow = Math.max(job.lastProcessedRow || 0, member.rowNumber || 0);
         updateJobMessage(job);
         await saveProgress(job);
         await delay(RATE_LIMIT_MS);
@@ -1136,6 +1226,19 @@ async function createDuplexPrintPdf(filePaths, destinationPath) {
   return destinationPath;
 }
 
+function currentOutputPdfPaths(outputPath) {
+  if (!fs.existsSync(outputPath)) {
+    return [];
+  }
+
+  return fs.readdirSync(outputPath)
+    .filter((fileName) => fileName.toLowerCase().endsWith(".pdf"))
+    .filter((fileName) => ![PRINT_READY_FILE_NAME, DUPLEX_PRINT_FILE_NAME].includes(fileName))
+    .map((fileName) => path.join(outputPath, fileName))
+    .filter((filePath) => fs.existsSync(filePath))
+    .sort();
+}
+
 async function readMemberCardPages(targetPdf, sourcePath) {
   const sourceBytes = await fsp.readFile(sourcePath);
   const sourcePdf = await PDFDocument.load(sourceBytes);
@@ -1264,6 +1367,8 @@ function publicJob(job) {
     skipped: job.skipped || 0,
     alreadyDone: job.alreadyDone,
     remaining: job.remaining,
+    lastProcessedRow: job.lastProcessedRow || 0,
+    lastProcessedRowTotal: job.lastProcessedRowTotal || 0,
     concurrency: job.concurrency,
     startRow: job.startRow,
     endRow: job.endRow,
@@ -1275,6 +1380,7 @@ function publicJob(job) {
     networkErrors: job.networkErrors || 0,
     networkRetryList: job.networkRetryList || [],
     pausedReason: job.pausedReason,
+    stopRequested: Boolean(job.stopRequested),
     message: job.message,
     downloadUrl: job.downloadUrl,
     printReadyUrl: job.printReadyUrl,
