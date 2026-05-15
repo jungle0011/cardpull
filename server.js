@@ -309,7 +309,13 @@ app.use((error, _req, res, _next) => {
   res.status(400).json({ error: error.message || "Request failed." });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, (error) => {
+  if (error) {
+    console.error(`cardpull failed to start on port ${PORT}: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
+
   console.log(`cardpull is running on http://localhost:${PORT}`);
 });
 
@@ -381,6 +387,7 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
   );
   const seen = new Set();
   const members = [];
+  let membersBuilt = 0;
   const resolvedRanges = [];
   const warnings = [];
 
@@ -412,7 +419,12 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
     for (let index = 0; index < selectedRows.length; index += 1) {
       const email = normalizeMemberId(selectedRows[index][emailIndex]);
       const dedupeKey = email.toLowerCase();
-      if (!email || seen.has(dedupeKey)) {
+      if (!email) {
+        continue;
+      }
+
+      membersBuilt += 1;
+      if (seen.has(dedupeKey)) {
         continue;
       }
 
@@ -425,6 +437,9 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
       });
     }
   }
+
+  console.log("Members array built:", membersBuilt);
+  console.log("After dedup:", members.length);
 
   return {
     ok: true,
@@ -452,6 +467,11 @@ async function runJob(job) {
   await fsp.mkdir(ZIP_DIR, { recursive: true });
 
   const members = job.preparedMembers;
+  job.existingOutputFiles = buildExistingOutputFileSet(job.outputPath);
+  const remainingForLog = members.filter(
+    (member) => !findExistingCardFileFromSet(job.outputPath, job.existingOutputFiles, member.email)
+  );
+  console.log("After skip already-done:", remainingForLog.length);
 
   job.total = members.length;
   job.remaining = members.length;
@@ -460,11 +480,18 @@ async function runJob(job) {
   await saveProgress(job, true);
 
   const limit = pLimit(job.concurrency);
+  let firstTaskLogged = false;
+  console.log("Starting p-limit pool...");
   const tasks = members.map((member, index) =>
     limit(async () => {
       let usedBrowser = false;
 
       try {
+        if (!firstTaskLogged) {
+          firstTaskLogged = true;
+          console.log("First task executing for:", member.email);
+        }
+
         await waitIfPaused(job);
 
         if (!member.email || !member.password) {
@@ -474,7 +501,7 @@ async function runJob(job) {
           return;
         }
 
-        const existingFile = await findExistingCardFile(job.outputPath, member.email);
+        const existingFile = findExistingCardFileFromSet(job.outputPath, job.existingOutputFiles, member.email);
         if (existingFile) {
           job.alreadyDone += 1;
           member.outputFile = existingFile;
@@ -486,6 +513,7 @@ async function runJob(job) {
         await delay((index % job.concurrency) * WORKER_STAGGER_MS);
         const savedFile = await processMemberWithRetries(member, job.outputPath);
         member.outputFile = savedFile;
+        rememberOutputFile(job.existingOutputFiles, savedFile);
         job.success += 1;
         job.consecutiveNetworkErrors = 0;
       } catch (error) {
@@ -561,7 +589,7 @@ async function processNetworkRetryQueue(job) {
       await delay((index % job.concurrency) * WORKER_STAGGER_MS);
 
       try {
-        const existingFile = await findExistingCardFile(job.outputPath, member.email);
+        const existingFile = findExistingCardFileFromSet(job.outputPath, job.existingOutputFiles, member.email);
         if (existingFile) {
           member.outputFile = existingFile;
           job.alreadyDone += 1;
@@ -571,6 +599,7 @@ async function processNetworkRetryQueue(job) {
 
         const savedFile = await processMemberWithRetries(member, job.outputPath);
         member.outputFile = savedFile;
+        rememberOutputFile(job.existingOutputFiles, savedFile);
         job.success += 1;
         job.consecutiveNetworkErrors = 0;
       } catch (error) {
@@ -638,6 +667,7 @@ async function recordNetworkError(job, member, error, options = {}) {
   const reason = String(error?.message || error || "Network error").replace(/\s+/g, " ").trim();
 
   await deleteMemberOutputFiles(job.outputPath, email);
+  forgetMemberOutputFiles(job.existingOutputFiles, email);
 
   if (retryAgain && !job.networkRetrySet.has(email)) {
     job.networkRetrySet.add(email);
@@ -1008,28 +1038,44 @@ function getChromiumLaunchOptions() {
   return launchOptions;
 }
 
-async function findExistingCardFile(outputPath, email) {
+function buildExistingOutputFileSet(outputPath) {
+  try {
+    return new Set(fs.readdirSync(outputPath));
+  } catch (_error) {
+    return new Set();
+  }
+}
+
+function findExistingCardFileFromSet(outputPath, existingFiles, email) {
   const baseName = safeFileName(email);
-  if (!baseName) {
+  if (!baseName || !existingFiles) {
     return null;
   }
 
   for (const ext of COMMON_CARD_EXTENSIONS) {
-    const filePath = path.join(outputPath, `${baseName}${ext}`);
-    if (await pathExists(filePath)) {
-      return filePath;
+    const fileName = `${baseName}${ext}`;
+    if (existingFiles.has(fileName)) {
+      return path.join(outputPath, fileName);
     }
   }
 
   return null;
 }
 
-async function pathExists(filePath) {
-  try {
-    await fsp.access(filePath);
-    return true;
-  } catch (_error) {
-    return false;
+function rememberOutputFile(existingFiles, filePath) {
+  if (existingFiles && filePath) {
+    existingFiles.add(path.basename(filePath));
+  }
+}
+
+function forgetMemberOutputFiles(existingFiles, email) {
+  const baseName = safeFileName(email);
+  if (!baseName || !existingFiles) {
+    return;
+  }
+
+  for (const ext of COMMON_CARD_EXTENSIONS) {
+    existingFiles.delete(`${baseName}${ext}`);
   }
 }
 
@@ -1147,20 +1193,9 @@ function normalizeCell(value) {
   return String(value ?? "").trim();
 }
 
-async function clearOutputFolder() {
-  await fsp.mkdir(OUTPUT_DIR, { recursive: true });
-
-  const entries = await fsp.readdir(OUTPUT_DIR, { withFileTypes: true });
-  await Promise.all(
-    entries.map((entry) =>
-      fsp.rm(path.join(OUTPUT_DIR, entry.name), {
-        recursive: true,
-        force: true,
-      })
-    )
-  );
-
-  await fsp.mkdir(ZIP_DIR, { recursive: true });
+function clearOutputFolder() {
+  fs.rmSync(OUTPUT_DIR, { recursive: true, force: true });
+  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
 function delay(ms) {
