@@ -1,6 +1,11 @@
 {
   "name": "CardPull",
   "image": "mcr.microsoft.com/devcontainers/javascript-node:18",
+  "features": {
+    "ghcr.io/devcontainers/features/sshd:1": {
+      "version": "latest"
+    }
+  },
   "postCreateCommand": "npm install && npx playwright install chromium --with-deps",
   "forwardPorts": [3000],
   "portsAttributes": {
