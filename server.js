@@ -1,6 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const XLSX = require("xlsx");
+const Papa = require("papaparse");
 const archiver = require("archiver");
 const pLimit = require("p-limit");
 const { PDFDocument } = require("pdf-lib");
@@ -135,7 +136,7 @@ app.post("/api/upload", upload.array("spreadsheet"), async (req, res) => {
   }
 });
 
-app.post("/api/preview", (req, res) => {
+app.post("/api/preview", async (req, res) => {
   const { uploadId, emailColumnIndex, fileRanges } = req.body;
   const meta = uploads.get(uploadId);
 
@@ -149,7 +150,7 @@ app.post("/api/preview", (req, res) => {
     return res.status(400).json({ error: "Choose a valid email column." });
   }
 
-  const prepared = prepareMembers(meta, emailIndex, "", fileRanges);
+  const prepared = await prepareMembers(null, meta, emailIndex, "", fileRanges);
   if (!prepared.ok) {
     return res.status(400).json({ error: prepared.error });
   }
@@ -181,45 +182,32 @@ app.post("/api/process", async (req, res) => {
     return res.status(400).json({ error: "Enter the shared password." });
   }
 
-  const prepared = prepareMembers(meta, emailIndex, password, fileRanges);
-  if (!prepared.ok) {
-    return res.status(400).json({ error: prepared.error });
-  }
-
   const requestedConcurrency = parseConcurrency(concurrency);
   if (!requestedConcurrency.ok) {
     return res.status(400).json({ error: requestedConcurrency.error });
   }
 
-  const connectivity = await checkSiteConnectivity();
-  if (!connectivity.ok) {
-    return res.status(400).json({
-      error: "Cannot reach pdpnigeria.org - check your internet connection before starting",
-    });
-  }
-
-  const rangeTotal = prepared.members.length;
   const jobId = crypto.randomUUID();
   const job = {
     id: jobId,
     uploadId,
-    status: "queued",
+    status: "preparing",
     current: 0,
-    total: rangeTotal,
+    total: 0,
     success: 0,
     failed: 0,
-    message: "Queued...",
+    message: "Preparing members...",
     downloadUrl: null,
     startedAt: new Date().toISOString(),
     finishedAt: null,
     error: null,
     alreadyDone: 0,
-    remaining: rangeTotal,
+    remaining: 0,
     concurrency: requestedConcurrency.value,
-    fileRanges: prepared.fileRanges,
-    fileCount: prepared.fileCount,
-    parseWarnings: prepared.warnings,
-    preparedMembers: prepared.members,
+    fileRanges: [],
+    fileCount: meta.files.length,
+    parseWarnings: [],
+    preparedMembers: [],
     zipPath: path.join(ZIP_DIR, `${jobId}.zip`),
     printReadyPath: path.join(OUTPUT_DIR, PRINT_READY_FILE_NAME),
     printReadyUrl: null,
@@ -227,9 +215,12 @@ app.post("/api/process", async (req, res) => {
     duplexPrintUrl: null,
     outputPath: OUTPUT_DIR,
     failedPath: path.join(ZIP_DIR, `${jobId}-failed.txt`),
+    skippedPath: path.join(ZIP_DIR, `${jobId}-skipped.txt`),
     progressPath: path.join(OUTPUT_DIR, "progress.json"),
     outputFiles: [],
     failedList: [],
+    skippedList: [],
+    skipped: 0,
     networkRetryQueue: [],
     networkRetryList: [],
     networkRetrySet: new Set(),
@@ -244,11 +235,12 @@ app.post("/api/process", async (req, res) => {
   };
 
   jobs.set(jobId, job);
-  runJob(job).catch((error) => {
+  prepareAndRunJob(job, meta, emailIndex, password, fileRanges).catch((error) => {
     job.status = "failed";
     job.error = error.message;
     job.message = "Run failed.";
     job.finishedAt = new Date().toISOString();
+    saveProgress(job, true).catch(() => {});
   });
 
   res.json({ jobId });
@@ -320,6 +312,10 @@ app.listen(PORT, (error) => {
 });
 
 function readWorkbookRows(filePath) {
+  if (path.extname(filePath).toLowerCase() === ".csv") {
+    return readCsvRows(filePath);
+  }
+
   const workbook = XLSX.readFile(filePath, { cellDates: false });
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) {
@@ -348,6 +344,55 @@ function readWorkbookRows(filePath) {
     .filter((row) => row.some((cell) => normalizeCell(cell) !== ""));
 
   return { headers, rows };
+}
+
+function readCsvRows(filePath) {
+  const text = readCsvText(filePath);
+  const parsed = Papa.parse(text, {
+    skipEmptyLines: "greedy",
+  });
+  const matrix = parsed.data
+    .map((row) => Array.isArray(row) ? row.map((cell) => normalizeCell(cell)) : [])
+    .filter((row) => row.some((cell) => normalizeCell(cell) !== ""));
+
+  if (matrix.length === 0) {
+    throw new Error("The CSV file is empty.");
+  }
+
+  const headers = matrix[0].map((value, index) => ({
+    index,
+    name: normalizeCell(value) || `Column ${index + 1}`,
+  }));
+
+  const rows = matrix
+    .slice(1)
+    .filter((row) => row.some((cell) => normalizeCell(cell) !== ""));
+
+  return { headers, rows };
+}
+
+function readCsvText(filePath) {
+  const buffer = fs.readFileSync(filePath);
+
+  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+    return buffer.slice(3).toString("utf8");
+  }
+
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return buffer.slice(2).toString("utf16le");
+  }
+
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    const swapped = Buffer.alloc(buffer.length - 2);
+    for (let index = 2; index + 1 < buffer.length; index += 2) {
+      swapped[index - 2] = buffer[index + 1];
+      swapped[index - 1] = buffer[index];
+    }
+    return swapped.toString("utf16le");
+  }
+
+  const utf8Text = buffer.toString("utf8");
+  return utf8Text.includes("\ufffd") ? buffer.toString("latin1") : utf8Text;
 }
 
 function parseRowRange(startRowValue, endRowValue, rowCount) {
@@ -379,7 +424,7 @@ function parseRowRange(startRowValue, endRowValue, rowCount) {
   return { ok: true, startRow, endRow };
 }
 
-function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
+async function prepareMembers(job, meta, emailIndex, sharedPassword, fileRanges) {
   const rangesByFile = new Map(
     Array.isArray(fileRanges)
       ? fileRanges.map((range) => [range.fileId, range])
@@ -389,6 +434,8 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
   const members = [];
   const resolvedRanges = [];
   const warnings = [];
+  const skipped = [];
+  let rowsParsed = 0;
 
   for (const file of meta.files) {
     const requestedRange = rangesByFile.get(file.id) || {};
@@ -416,23 +463,41 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
     const selectedRows = rows.slice(range.startRow - 1, range.endRow);
 
     for (let index = 0; index < selectedRows.length; index += 1) {
-      const email = normalizeMemberId(selectedRows[index][emailIndex]);
-      const dedupeKey = email.toLowerCase();
-      if (!email) {
+      const rowNumber = range.startRow + index + 1;
+      const phoneResult = normalizePhoneForProcessing(selectedRows[index][emailIndex], rowNumber);
+      rowsParsed += 1;
+
+      if (!phoneResult.ok) {
+        skipped.push({
+          rowNumber,
+          value: phoneResult.value,
+          reason: phoneResult.reason,
+        });
+        await yieldDuringPreparation(job, members.length, skipped.length, rowsParsed);
         continue;
       }
 
+      const email = phoneResult.phone;
+      const dedupeKey = email.toLowerCase();
       if (seen.has(dedupeKey)) {
+        skipped.push({
+          rowNumber,
+          value: email,
+          reason: "duplicate phone number",
+        });
+        await yieldDuringPreparation(job, members.length, skipped.length, rowsParsed);
         continue;
       }
 
       seen.add(dedupeKey);
       members.push({
-        rowNumber: range.startRow + index + 1,
+        rowNumber,
         fileName: file.originalName,
         email,
         password: sharedPassword,
       });
+
+      await yieldDuringPreparation(job, members.length, skipped.length, rowsParsed);
     }
   }
 
@@ -442,7 +507,64 @@ function prepareMembers(meta, emailIndex, sharedPassword, fileRanges) {
     fileRanges: resolvedRanges,
     fileCount: meta.files.length,
     warnings,
+    skipped,
   };
+}
+
+function normalizePhoneForProcessing(value, rowNumber) {
+  const original = normalizeCell(value).replace(/\u00a0/g, " ");
+  const text = original.trim();
+
+  if (!text) {
+    return { ok: false, value: `row ${rowNumber}`, reason: "empty phone number" };
+  }
+
+  if (/[A-Za-z]/.test(text.replace(/^\+/, ""))) {
+    return { ok: false, value: `row ${rowNumber}`, reason: "phone contains letters" };
+  }
+
+  const digits = text.replace(/\D/g, "");
+  if (digits.length < 10) {
+    return { ok: false, value: text, reason: "invalid phone number" };
+  }
+
+  if (digits.length > 11) {
+    return { ok: false, value: `row ${rowNumber}`, reason: "phone too long (11+ digits)" };
+  }
+
+  const phone = digits.length === 10 ? `0${digits}` : digits;
+  if (!/^0[789]\d{9}$/.test(phone)) {
+    return { ok: false, value: text, reason: "invalid phone number" };
+  }
+
+  return { ok: true, phone };
+}
+
+async function yieldDuringPreparation(job, memberCount, skippedCount, rowsParsed) {
+  if (rowsParsed % 500 !== 0) {
+    return;
+  }
+
+  if (job) {
+    job.message = `Preparing ${memberCount} members...`;
+    job.total = memberCount;
+    job.remaining = memberCount;
+    job.skipped = skippedCount;
+    await saveProgress(job, true);
+  }
+
+  await delay(100);
+}
+
+async function writeSkippedLog(job, skipped) {
+  if (!skipped || skipped.length === 0) {
+    return;
+  }
+
+  const lines = skipped
+    .map((entry) => `${entry.value || `row ${entry.rowNumber}`}: skipped - ${entry.reason}`)
+    .join("\n");
+  await fsp.writeFile(job.skippedPath, `${lines}\n`, "utf8");
 }
 
 function parseConcurrency(value) {
@@ -455,6 +577,32 @@ function parseConcurrency(value) {
   }
 
   return { ok: true, value: parsed };
+}
+
+async function prepareAndRunJob(job, meta, emailIndex, password, fileRanges) {
+  await saveProgress(job, true);
+
+  const prepared = await prepareMembers(job, meta, emailIndex, password, fileRanges);
+  if (!prepared.ok) {
+    throw new Error(prepared.error);
+  }
+
+  job.preparedMembers = prepared.members;
+  job.total = prepared.members.length;
+  job.remaining = prepared.members.length;
+  job.fileRanges = prepared.fileRanges;
+  job.fileCount = prepared.fileCount;
+  job.parseWarnings = prepared.warnings;
+  job.skippedList = prepared.skipped;
+  job.skipped = prepared.skipped.length;
+  await writeSkippedLog(job, prepared.skipped);
+
+  const connectivity = await checkSiteConnectivity();
+  if (!connectivity.ok) {
+    throw new Error("Cannot reach pdpnigeria.org - check your internet connection before starting");
+  }
+
+  await runJob(job);
 }
 
 async function runJob(job) {
@@ -541,6 +689,7 @@ async function runJob(job) {
   await zipFiles(
     [...job.outputFiles, mergedPdfPath, duplexPdfPath].filter(Boolean),
     job.failedPath,
+    job.skippedPath,
     job.zipPath
   );
   job.status = "completed";
@@ -897,7 +1046,7 @@ async function visibleText(page, pattern) {
   }, pattern.source);
 }
 
-function zipFiles(filePaths, failedPath, destinationPath) {
+function zipFiles(filePaths, failedPath, skippedPath, destinationPath) {
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(destinationPath);
     const archive = archiver("zip", { zlib: { level: 9 } });
@@ -914,6 +1063,10 @@ function zipFiles(filePaths, failedPath, destinationPath) {
 
     if (failedPath && fs.existsSync(failedPath) && fs.statSync(failedPath).size > 0) {
       archive.file(failedPath, { name: "failed.txt" });
+    }
+
+    if (skippedPath && fs.existsSync(skippedPath) && fs.statSync(skippedPath).size > 0) {
+      archive.file(skippedPath, { name: "skipped.txt" });
     }
 
     archive.finalize();
@@ -1082,6 +1235,7 @@ async function saveProgress(job, force = false) {
     ...publicJob(job),
     outputPath: job.outputPath,
     failedPath: job.failedPath,
+    skippedPath: job.skippedPath,
     progressPath: job.progressPath,
     printReadyPath: job.printReadyPath,
     duplexPrintPath: job.duplexPrintPath,
@@ -1107,6 +1261,7 @@ function publicJob(job) {
     total: job.total,
     success: job.success,
     failed: job.failed,
+    skipped: job.skipped || 0,
     alreadyDone: job.alreadyDone,
     remaining: job.remaining,
     concurrency: job.concurrency,
@@ -1116,6 +1271,7 @@ function publicJob(job) {
     fileRanges: job.fileRanges,
     parseWarnings: job.parseWarnings,
     failedList: job.failedList,
+    skippedList: job.skippedList || [],
     networkErrors: job.networkErrors || 0,
     networkRetryList: job.networkRetryList || [],
     pausedReason: job.pausedReason,

@@ -573,7 +573,9 @@
       function renderJob(job) {
         const total = job.total || 0;
         const current = job.current || 0;
-        progressText.textContent = total
+        progressText.textContent = job.status === "preparing"
+          ? job.message
+          : total
           ? `${job.alreadyDone || 0} already done, processing remaining ${job.remaining || 0}... Processing ${current} of ${total}.`
           : job.message;
         progressBar.max = total || 100;
