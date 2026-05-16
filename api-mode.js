@@ -10,6 +10,18 @@ const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 
 const LOGIN_URL = "https://api.pdpnigeria.org/api/auth/login";
 const ME_URL = "https://api.pdpnigeria.org/api/auth/me";
+const PDP_BROWSER_HEADERS = {
+  Origin: "https://pdpnigeria.org",
+  Referer: "https://pdpnigeria.org/login",
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+  "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148"',
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"macOS"',
+  "sec-fetch-dest": "empty",
+  "sec-fetch-mode": "cors",
+  "sec-fetch-site": "same-site",
+};
 const OUTPUT_DIR = path.join(__dirname, "output");
 const FAILED_PATH = path.join(OUTPUT_DIR, "failed.txt");
 const RATE_LIMITED_PATH = path.join(OUTPUT_DIR, "rate-limited.txt");
@@ -378,6 +390,7 @@ async function fetchMember(phone, password) {
   const loginResponse = await fetchWithRetry(LOGIN_URL, {
     method: "POST",
     headers: {
+      ...PDP_BROWSER_HEADERS,
       accept: "application/json, text/plain, */*",
       "content-type": "application/json",
     },
@@ -402,6 +415,7 @@ async function fetchMember(phone, password) {
 
   const profileResponse = await fetchWithRetry(ME_URL, {
     headers: {
+      ...PDP_BROWSER_HEADERS,
       accept: "application/json, text/plain, */*",
       authorization: `Bearer ${token}`,
     },
