@@ -1,6 +1,7 @@
 const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
+const zlib = require("zlib");
 const XLSX = require("xlsx");
 const Papa = require("papaparse");
 const pLimit = require("p-limit");
@@ -187,17 +188,134 @@ async function readCsvRows(filePath) {
 }
 
 function readExcelRows(filePath) {
-  const workbook = XLSX.readFile(filePath, { cellDates: false });
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) {
-    throw new Error("Excel file has no sheets.");
+  try {
+    const workbook = XLSX.readFile(filePath, { cellDates: false });
+    const sheetName = workbook.SheetNames[0];
+    if (!sheetName) {
+      throw new Error("Excel file has no sheets.");
+    }
+    return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+      header: 1,
+      defval: "",
+      raw: false,
+      blankrows: false,
+    });
+  } catch (error) {
+    const rows = readBrokenXlsxRows(filePath);
+    if (rows.length === 0) {
+      throw error;
+    }
+    return rows;
   }
-  return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
-    header: 1,
-    defval: "",
-    raw: false,
-    blankrows: false,
-  });
+}
+
+function readBrokenXlsxRows(filePath) {
+  const parts = extractZipParts(fs.readFileSync(filePath));
+  const sheetXml = parts.get("xl/worksheets/sheet1.xml");
+  if (!sheetXml) return [];
+
+  const sharedStrings = parseSharedStrings(parts.get("xl/sharedStrings.xml") || "");
+  const rows = [];
+  const rowPattern = /<row\b[^>]*>([\s\S]*?)<\/row>/g;
+  let rowMatch;
+  while ((rowMatch = rowPattern.exec(sheetXml))) {
+    const row = [];
+    const cellPattern = /<c\b([^>]*)>([\s\S]*?)<\/c>/g;
+    let cellMatch;
+    while ((cellMatch = cellPattern.exec(rowMatch[1]))) {
+      const attrs = cellMatch[1];
+      const body = cellMatch[2];
+      const ref = readXmlAttr(attrs, "r");
+      const cellType = readXmlAttr(attrs, "t");
+      const columnIndex = ref ? columnNameToIndex(ref.replace(/\d+/g, "")) : row.length;
+      row[columnIndex] = readCellValue(body, cellType, sharedStrings);
+    }
+    if (!isEmptyRow(row)) rows.push(row);
+  }
+  return rows;
+}
+
+function extractZipParts(buffer) {
+  const offsets = [];
+  for (let index = 0; index < buffer.length - 4; index += 1) {
+    if (buffer.readUInt32LE(index) === 0x04034b50) {
+      offsets.push(index);
+    }
+  }
+
+  const parts = new Map();
+  for (let index = 0; index < offsets.length; index += 1) {
+    const offset = offsets[index];
+    const method = buffer.readUInt16LE(offset + 8);
+    const compressedSize = buffer.readUInt32LE(offset + 18);
+    const nameLength = buffer.readUInt16LE(offset + 26);
+    const extraLength = buffer.readUInt16LE(offset + 28);
+    const name = buffer.slice(offset + 30, offset + 30 + nameLength).toString();
+    const dataStart = offset + 30 + nameLength + extraLength;
+    const dataEnd = compressedSize > 0
+      ? dataStart + compressedSize
+      : index + 1 < offsets.length ? offsets[index + 1] : buffer.length;
+    const compressed = buffer.slice(dataStart, dataEnd);
+    const xml = method === 8
+      ? zlib.inflateRawSync(compressed, { finishFlush: zlib.constants.Z_SYNC_FLUSH }).toString("utf8")
+      : compressed.toString("utf8");
+    parts.set(name, xml);
+  }
+  return parts;
+}
+
+function parseSharedStrings(xml) {
+  const strings = [];
+  const pattern = /<si\b[^>]*>([\s\S]*?)<\/si>/g;
+  let match;
+  while ((match = pattern.exec(xml))) {
+    const textParts = [...match[1].matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)]
+      .map((part) => decodeXml(part[1]));
+    strings.push(textParts.join(""));
+  }
+  return strings;
+}
+
+function readCellValue(body, cellType, sharedStrings) {
+  if (cellType === "inlineStr") {
+    const inline = body.match(/<t\b[^>]*>([\s\S]*?)<\/t>/);
+    return inline ? decodeXml(inline[1]) : "";
+  }
+
+  const valueMatch = body.match(/<v>([\s\S]*?)<\/v>/);
+  if (!valueMatch) return "";
+  const value = decodeXml(valueMatch[1]);
+  if (cellType === "s") {
+    return sharedStrings[Number(value)] || "";
+  }
+  return value;
+}
+
+function readXmlAttr(attrs, name) {
+  const match = attrs.match(new RegExp(`${name}="([^"]*)"`));
+  return match ? decodeXml(match[1]) : "";
+}
+
+function decodeXml(value) {
+  return String(value || "")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function columnNameToIndex(name) {
+  let index = 0;
+  for (const char of name) {
+    index = index * 26 + (char.toUpperCase().charCodeAt(0) - 64);
+  }
+  return Math.max(0, index - 1);
+}
+
+function isEmptyRow(row) {
+  const cells = Array.isArray(row) ? row : Object.values(row || {});
+  return cells.every((value) => String(value ?? "").trim() === "");
 }
 
 function detectPhoneColumnIndex(rows) {
