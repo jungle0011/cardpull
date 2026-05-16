@@ -6,22 +6,36 @@ const XLSX = require("xlsx");
 const Papa = require("papaparse");
 const pLimit = require("p-limit");
 const QRCode = require("qrcode");
+const { Agent } = require("undici");
 const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 
 const LOGIN_URL = "https://api.pdpnigeria.org/api/auth/login";
 const ME_URL = "https://api.pdpnigeria.org/api/auth/me";
 const PDP_BROWSER_HEADERS = {
+  Accept: "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
+  Connection: "keep-alive",
+  "Cache-Control": "no-cache",
+  Pragma: "no-cache",
+  DNT: "1",
   Origin: "https://pdpnigeria.org",
   Referer: "https://pdpnigeria.org/login",
   "User-Agent":
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-  "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148"',
+  "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not)A;Brand";v="99"',
   "sec-ch-ua-mobile": "?0",
   "sec-ch-ua-platform": '"macOS"',
   "sec-fetch-dest": "empty",
   "sec-fetch-mode": "cors",
   "sec-fetch-site": "same-site",
 };
+const FETCH_DISPATCHER = new Agent({
+  connections: 128,
+  keepAliveTimeout: 30000,
+  keepAliveMaxTimeout: 120000,
+  pipelining: 1,
+});
 const OUTPUT_DIR = path.join(__dirname, "output");
 const FAILED_PATH = path.join(OUTPUT_DIR, "failed.txt");
 const RATE_LIMITED_PATH = path.join(OUTPUT_DIR, "rate-limited.txt");
@@ -391,8 +405,7 @@ async function fetchMember(phone, password) {
     method: "POST",
     headers: {
       ...PDP_BROWSER_HEADERS,
-      accept: "application/json, text/plain, */*",
-      "content-type": "application/json",
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({ email: phone, password }),
   });
@@ -416,8 +429,7 @@ async function fetchMember(phone, password) {
   const profileResponse = await fetchWithRetry(ME_URL, {
     headers: {
       ...PDP_BROWSER_HEADERS,
-      accept: "application/json, text/plain, */*",
-      authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${token}`,
     },
   });
   const profileText = await profileResponse.text();
@@ -441,7 +453,7 @@ async function fetchWithRetry(url, options) {
   for (let attempt = 1; attempt <= REQUEST_RETRIES; attempt += 1) {
     try {
       await waitForRequestSlot();
-      const response = await fetch(url, options);
+      const response = await fetch(url, { ...options, dispatcher: FETCH_DISPATCHER });
       if (response.status !== 429 && response.status < 500) {
         return response;
       }
