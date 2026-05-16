@@ -575,10 +575,49 @@ async function embedDataUrlImage(pdfDoc, dataUrl) {
     throw new Error("Missing image data.");
   }
   const trimmed = dataUrl.trim();
+  const remoteBytes = await fetchRemoteImageBytes(trimmed);
+  if (remoteBytes) {
+    return embedImageBytes(pdfDoc, remoteBytes, "");
+  }
+
   const match = trimmed.match(/^data:([^;]+);base64,(.+)$/);
   const mime = match?.[1]?.toLowerCase() || "";
   const base64 = match ? match[2] : trimmed;
   const bytes = Buffer.from(base64.replace(/\s/g, ""), "base64");
+  return embedImageBytes(pdfDoc, bytes, mime);
+}
+
+async function fetchRemoteImageBytes(value) {
+  const urls = [];
+  if (/^https?:\/\//i.test(value)) {
+    urls.push(value);
+  } else if (value.startsWith("/")) {
+    urls.push(`https://api.pdpnigeria.org${value}`, `https://pdpnigeria.org${value}`);
+  }
+  if (urls.length === 0) return null;
+
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, {
+        dispatcher: FETCH_DISPATCHER,
+        headers: {
+          ...PDP_BROWSER_HEADERS,
+          Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+          Referer: "https://pdpnigeria.org/dashboard",
+          "sec-fetch-dest": "image",
+        },
+      });
+      if (!response.ok) continue;
+      return Buffer.from(await response.arrayBuffer());
+    } catch {
+      // Try the next possible host for root-relative image paths.
+    }
+  }
+
+  return null;
+}
+
+function embedImageBytes(pdfDoc, bytes, mime) {
   const isPng = mime.includes("png") || bytes.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   const isJpg = mime.includes("jpeg") || mime.includes("jpg") || bytes.subarray(0, 2).equals(Buffer.from([0xff, 0xd8]));
 
