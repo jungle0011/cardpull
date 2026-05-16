@@ -631,12 +631,12 @@ function drawBack(page, fonts, member, logo) {
 }
 
 function drawCardShell(page) {
-  drawRoundedRect(page, 0, 0, CARD_WIDTH, CARD_HEIGHT, 16, GREEN, GREEN, 0);
-  drawRoundedRect(page, 12, 12, CARD_WIDTH - 24, CARD_HEIGHT - 24, 12, rgb(1, 1, 1), GREEN, 2);
+  drawFilledRoundedRect(page, 0, 0, CARD_WIDTH, CARD_HEIGHT, 16, GREEN);
+  page.drawRectangle({ x: 2, y: 2, width: CARD_WIDTH - 4, height: 208, color: rgb(1, 1, 1) });
 }
 
 function drawHeader(page, fonts, subtitle, logo) {
-  page.drawRectangle({ x: 12, y: 210, width: CARD_WIDTH - 24, height: 42, color: GREEN });
+  page.drawRectangle({ x: 2, y: 210, width: CARD_WIDTH - 4, height: 44, color: GREEN });
   if (logo) {
     page.drawImage(logo, { x: 25, y: 217, width: 30, height: 30 });
   } else {
