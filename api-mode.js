@@ -394,7 +394,7 @@ function normalizePhone(value) {
   if (digits.length === 10) {
     digits = `0${digits}`;
   }
-  if (digits.length !== 11 || !digits.startsWith("0")) {
+  if (digits.length !== 11 || !digits.startsWith("0") || digits.startsWith("00")) {
     return null;
   }
   return digits;
