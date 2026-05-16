@@ -603,7 +603,7 @@ function drawFront(page, fonts, member, photo, qr, logo) {
   drawHeader(page, fonts, "MEMBERSHIP CARD", logo);
 
   page.drawText("FULL NAME", { x: 122, y: 179, size: 6, font: fonts.bold, color: MUTED });
-  page.drawText(memberName(member), { x: 122, y: 166, size: 11, font: fonts.bold, color: DARK });
+  page.drawText(pdfText(memberName(member)), { x: 122, y: 166, size: 11, font: fonts.bold, color: DARK });
 
   drawField(page, fonts, "CARD NUMBER", member.membershipId || "-", 122, 145, 7, GREEN);
   drawField(page, fonts, "DATE OF BIRTH", formatDob(member.dob), 122, 119);
@@ -677,11 +677,11 @@ function drawHeader(page, fonts, subtitle, logo) {
 
 function drawField(page, fonts, label, value, x, y, size = 7, color = DARK) {
   page.drawText(label, { x, y, size: 5.5, font: fonts.bold, color: MUTED });
-  page.drawText(String(value || "-"), { x, y: y - 10, size, font: fonts.bold, color });
+  page.drawText(pdfText(value || "-"), { x, y: y - 10, size, font: fonts.bold, color });
 }
 
 function drawFooter(page, fonts, text) {
-  page.drawText(text, {
+  page.drawText(pdfText(text), {
     x: 165,
     y: 23,
     size: 5.5,
@@ -719,6 +719,18 @@ function drawFilledRoundedRect(page, x, y, width, height, radius, color) {
 
 function memberName(member) {
   return [member.firstName, member.lastName].filter(Boolean).join(" ") || member.loginPhone || "-";
+}
+
+function pdfText(value) {
+  return String(value || "-")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[’‘]/g, "'")
+    .replace(/[“”]/g, "\"")
+    .replace(/[–—]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/[^\x20-\x7E]/g, "")
+    .trim() || "-";
 }
 
 function verificationUrl(member) {
