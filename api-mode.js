@@ -574,16 +574,21 @@ async function embedDataUrlImage(pdfDoc, dataUrl) {
   if (!dataUrl || typeof dataUrl !== "string") {
     throw new Error("Missing image data.");
   }
-  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-  if (!match) {
-    throw new Error("Unsupported image data URL.");
-  }
-  const mime = match[1].toLowerCase();
-  const bytes = Buffer.from(match[2], "base64");
-  if (mime.includes("png")) {
+  const trimmed = dataUrl.trim();
+  const match = trimmed.match(/^data:([^;]+);base64,(.+)$/);
+  const mime = match?.[1]?.toLowerCase() || "";
+  const base64 = match ? match[2] : trimmed;
+  const bytes = Buffer.from(base64.replace(/\s/g, ""), "base64");
+  const isPng = mime.includes("png") || bytes.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const isJpg = mime.includes("jpeg") || mime.includes("jpg") || bytes.subarray(0, 2).equals(Buffer.from([0xff, 0xd8]));
+
+  if (isPng) {
     return pdfDoc.embedPng(bytes);
   }
-  return pdfDoc.embedJpg(bytes);
+  if (isJpg) {
+    return pdfDoc.embedJpg(bytes);
+  }
+  throw new Error("Unsupported image data.");
 }
 
 async function embedPdpLogo(pdfDoc) {
