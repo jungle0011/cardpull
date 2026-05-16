@@ -18,13 +18,14 @@ const REQUEST_RETRIES = 10;
 let requestSpacingMs = 500;
 let nextRequestAt = 0;
 let rateLimitedUntil = 0;
-const CARD_WIDTH = 237.6;
-const CARD_HEIGHT = 158.4;
+const CARD_WIDTH = 420;
+const CARD_HEIGHT = 264;
 const GREEN = rgb(0, 0.54, 0.25);
 const RED = rgb(0.9, 0.06, 0.06);
 const DARK = rgb(0.12, 0.14, 0.16);
 const MUTED = rgb(0.42, 0.46, 0.5);
 const LIGHT = rgb(0.95, 0.95, 0.95);
+let pdpLogoBytesPromise = null;
 
 main().catch((error) => {
   console.error(error.message || error);
@@ -529,14 +530,15 @@ async function createMemberCardPdf(member, outputPath) {
   };
 
   const photo = await embedDataUrlImage(pdfDoc, member.passportPhoto).catch(() => null);
+  const logo = await embedPdpLogo(pdfDoc).catch(() => null);
   const qrDataUrl = await QRCode.toDataURL(verificationUrl(member), {
     margin: 1,
     width: 280,
   });
   const qr = await embedDataUrlImage(pdfDoc, qrDataUrl);
 
-  drawFront(pdfDoc.addPage([CARD_WIDTH, CARD_HEIGHT]), fonts, member, photo, qr);
-  drawBack(pdfDoc.addPage([CARD_WIDTH, CARD_HEIGHT]), fonts, member);
+  drawFront(pdfDoc.addPage([CARD_WIDTH, CARD_HEIGHT]), fonts, member, photo, qr, logo);
+  drawBack(pdfDoc.addPage([CARD_WIDTH, CARD_HEIGHT]), fonts, member, logo);
 
   const bytes = await pdfDoc.save();
   await fsp.writeFile(outputPath, bytes);
@@ -558,41 +560,53 @@ async function embedDataUrlImage(pdfDoc, dataUrl) {
   return pdfDoc.embedJpg(bytes);
 }
 
-function drawFront(page, fonts, member, photo, qr) {
+async function embedPdpLogo(pdfDoc) {
+  if (!pdpLogoBytesPromise) {
+    pdpLogoBytesPromise = fetch("https://pdpnigeria.org/favicon.png")
+      .then((response) => {
+        if (!response.ok) throw new Error(`Logo failed with HTTP ${response.status}`);
+        return response.arrayBuffer();
+      })
+      .then((buffer) => Buffer.from(buffer));
+  }
+  return pdfDoc.embedPng(await pdpLogoBytesPromise);
+}
+
+function drawFront(page, fonts, member, photo, qr, logo) {
   drawCardShell(page);
-  drawHeader(page, fonts, "MEMBERSHIP CARD");
+  drawHeader(page, fonts, "MEMBERSHIP CARD", logo);
 
-  page.drawText("FULL NAME", { x: 69, y: 107, size: 3.6, font: fonts.bold, color: MUTED });
-  page.drawText(memberName(member), { x: 69, y: 99, size: 6, font: fonts.bold, color: DARK, maxWidth: 82 });
+  page.drawText("FULL NAME", { x: 122, y: 179, size: 6, font: fonts.bold, color: MUTED });
+  page.drawText(memberName(member), { x: 122, y: 166, size: 11, font: fonts.bold, color: DARK });
 
-  drawField(page, fonts, "CARD NUMBER", member.membershipId || "-", 69, 88, 4.2, 74, GREEN);
-  drawField(page, fonts, "DATE OF BIRTH", formatDob(member.dob), 69, 72, 3.8, 74, DARK);
-  drawField(page, fonts, "STATE", member.stateOrigin || "-", 69, 55, 3.8, 48, DARK);
-  drawField(page, fonts, "LGA", member.lga || "-", 124, 55, 3.8, 45, DARK);
-  drawField(page, fonts, "WARD", member.ward || "-", 69, 39, 3.8, 48, DARK);
-  drawField(page, fonts, "POLLING UNIT", member.pollingUnit || "-", 124, 39, 3.8, 45, DARK);
+  drawField(page, fonts, "CARD NUMBER", member.membershipId || "-", 122, 145, 7, GREEN);
+  drawField(page, fonts, "DATE OF BIRTH", formatDob(member.dob), 122, 119);
+  drawField(page, fonts, "STATE", member.stateOrigin || "-", 122, 93);
+  drawField(page, fonts, "LGA", member.lga || "-", 220, 93);
+  drawField(page, fonts, "WARD", member.ward || "-", 122, 67);
+  drawField(page, fonts, "POLLING UNIT", member.pollingUnit || "-", 220, 67);
 
   if (photo) {
-    page.drawImage(photo, { x: 16, y: 50, width: 51, height: 64 });
+    page.drawImage(photo, { x: 28, y: 82, width: 78, height: 92 });
   } else {
-    page.drawRectangle({ x: 16, y: 50, width: 51, height: 64, borderColor: GREEN, borderWidth: 0.6, color: LIGHT });
-    page.drawText("PHOTO", { x: 30, y: 80, size: 5, font: fonts.bold, color: MUTED });
+    page.drawRectangle({ x: 28, y: 82, width: 78, height: 92, borderColor: GREEN, borderWidth: 1, color: LIGHT });
+    page.drawText("PHOTO", { x: 49, y: 124, size: 8, font: fonts.bold, color: MUTED });
   }
 
-  page.drawImage(qr, { x: 179, y: 56, width: 42, height: 42 });
-  page.drawText("Scan to verify", { x: 187, y: 49, size: 2.8, font: fonts.regular, color: MUTED });
+  page.drawImage(qr, { x: 314, y: 82, width: 72, height: 72 });
+  page.drawText("Scan to verify", { x: 327, y: 72, size: 5, font: fonts.regular, color: MUTED });
 
   drawFooter(page, fonts, `Card ID: ${member.membershipId || "-"}`);
 }
 
-function drawBack(page, fonts, member) {
+function drawBack(page, fonts, member, logo) {
   drawCardShell(page);
-  drawHeader(page, fonts, "MEMBERSHIP CARD - BACK");
+  drawHeader(page, fonts, "MEMBERSHIP CARD - BACK", logo);
 
   page.drawText("Official Authentication Advisory", {
-    x: 74,
-    y: 89,
-    size: 6,
+    x: 104,
+    y: 137,
+    size: 13,
     font: fonts.bold,
     color: RED,
   });
@@ -605,52 +619,76 @@ function drawBack(page, fonts, member) {
   advisory.forEach((line, index) => {
     page.drawText(line, {
       x: 70,
-      y: 75 - index * 7,
-      size: 4.2,
+      y: 114 - index * 13,
+      size: 8,
       font: fonts.regular,
       color: DARK,
     });
   });
 
-  page.drawRectangle({ x: 9, y: 14, width: CARD_WIDTH - 18, height: 16, color: LIGHT });
+  page.drawRectangle({ x: 16, y: 26, width: 388, height: 24, color: LIGHT });
   drawFooter(page, fonts, `Card ID: ${member.membershipId || "-"}`);
 }
 
 function drawCardShell(page) {
-  page.drawRectangle({
-    x: 0,
-    y: 0,
-    width: CARD_WIDTH,
-    height: CARD_HEIGHT,
-    color: rgb(1, 1, 1),
-    borderColor: GREEN,
-    borderWidth: 1.5,
-  });
+  drawRoundedRect(page, 0, 0, CARD_WIDTH, CARD_HEIGHT, 16, GREEN, GREEN, 0);
+  drawRoundedRect(page, 12, 12, CARD_WIDTH - 24, CARD_HEIGHT - 24, 12, rgb(1, 1, 1), GREEN, 2);
 }
 
-function drawHeader(page, fonts, subtitle) {
-  page.drawRectangle({ x: 0, y: CARD_HEIGHT - 27, width: CARD_WIDTH, height: 27, color: GREEN });
-  page.drawCircle({ x: 18, y: CARD_HEIGHT - 13.5, size: 9, color: rgb(1, 1, 1), borderColor: RED, borderWidth: 1 });
-  page.drawText("PDP", { x: 12.5, y: CARD_HEIGHT - 16.5, size: 5, font: fonts.bold, color: GREEN });
-  page.drawText("PEOPLES DEMOCRATIC PARTY", { x: 34, y: CARD_HEIGHT - 11, size: 4.8, font: fonts.bold, color: rgb(1, 1, 1) });
-  page.drawText(subtitle, { x: 34, y: CARD_HEIGHT - 18, size: 3.6, font: fonts.bold, color: rgb(1, 1, 1) });
-  page.drawText("FEDERAL REPUBLIC OF", { x: 178, y: CARD_HEIGHT - 11, size: 3.6, font: fonts.bold, color: rgb(1, 1, 1) });
-  page.drawText("NIGERIA", { x: 201, y: CARD_HEIGHT - 19, size: 5.4, font: fonts.bold, color: rgb(1, 1, 1) });
+function drawHeader(page, fonts, subtitle, logo) {
+  page.drawRectangle({ x: 12, y: 210, width: CARD_WIDTH - 24, height: 42, color: GREEN });
+  if (logo) {
+    page.drawImage(logo, { x: 25, y: 217, width: 30, height: 30 });
+  } else {
+    page.drawCircle({ x: 36, y: 231, size: 14, color: rgb(1, 1, 1), borderColor: RED, borderWidth: 1.5 });
+    page.drawText("PDP", { x: 27, y: 226, size: 8, font: fonts.bold, color: GREEN });
+  }
+  page.drawText("PEOPLES DEMOCRATIC PARTY", { x: 68, y: 235, size: 8, font: fonts.bold, color: rgb(1, 1, 1) });
+  page.drawText(subtitle, { x: 68, y: 224, size: 5, font: fonts.bold, color: rgb(1, 1, 1) });
+  page.drawText("FEDERAL REPUBLIC OF", { x: 308, y: 235, size: 5, font: fonts.bold, color: rgb(1, 1, 1) });
+  page.drawText("NIGERIA", { x: 340, y: 224, size: 9, font: fonts.bold, color: rgb(1, 1, 1) });
 }
 
-function drawField(page, fonts, label, value, x, y, size = 3.8, maxWidth = 50, color = DARK) {
-  page.drawText(label, { x, y, size: 3, font: fonts.bold, color: MUTED });
-  page.drawText(String(value || "-"), { x, y: y - 6, size, font: fonts.bold, color, maxWidth });
+function drawField(page, fonts, label, value, x, y, size = 7, color = DARK) {
+  page.drawText(label, { x, y, size: 5.5, font: fonts.bold, color: MUTED });
+  page.drawText(String(value || "-"), { x, y: y - 10, size, font: fonts.bold, color });
 }
 
 function drawFooter(page, fonts, text) {
   page.drawText(text, {
-    x: 90,
-    y: 8,
-    size: 3.2,
+    x: 165,
+    y: 23,
+    size: 5.5,
     font: fonts.bold,
     color: GREEN,
   });
+}
+
+function drawRoundedRect(page, x, y, width, height, radius, color, borderColor, borderWidth) {
+  if (borderWidth && borderColor) {
+    drawFilledRoundedRect(page, x, y, width, height, radius, borderColor);
+    drawFilledRoundedRect(
+      page,
+      x + borderWidth,
+      y + borderWidth,
+      width - borderWidth * 2,
+      height - borderWidth * 2,
+      Math.max(0, radius - borderWidth),
+      color
+    );
+    return;
+  }
+
+  drawFilledRoundedRect(page, x, y, width, height, radius, color);
+}
+
+function drawFilledRoundedRect(page, x, y, width, height, radius, color) {
+  page.drawRectangle({ x: x + radius, y, width: width - radius * 2, height, color });
+  page.drawRectangle({ x, y: y + radius, width, height: height - radius * 2, color });
+  page.drawCircle({ x: x + radius, y: y + radius, size: radius, color });
+  page.drawCircle({ x: x + width - radius, y: y + radius, size: radius, color });
+  page.drawCircle({ x: x + radius, y: y + height - radius, size: radius, color });
+  page.drawCircle({ x: x + width - radius, y: y + height - radius, size: radius, color });
 }
 
 function memberName(member) {
