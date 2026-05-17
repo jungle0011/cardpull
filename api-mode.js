@@ -9,8 +9,10 @@ const QRCode = require("qrcode");
 const { Agent } = require("undici");
 const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 
-const LOGIN_URL = "https://api.pdpnigeria.org/api/auth/login";
-const ME_URL = "https://api.pdpnigeria.org/api/auth/me";
+const API_BASE_URL = "https://api.dev.pdpnigeria.org";
+const APP_BASE_URL = "https://dev.pdpnigeria.org";
+const LOGIN_URL = `${API_BASE_URL}/api/auth/login`;
+const ME_URL = `${API_BASE_URL}/api/auth/me`;
 const PDP_BROWSER_HEADERS = {
   Accept: "application/json, text/plain, */*",
   "Accept-Language": "en-US,en;q=0.9",
@@ -19,8 +21,8 @@ const PDP_BROWSER_HEADERS = {
   "Cache-Control": "no-cache",
   Pragma: "no-cache",
   DNT: "1",
-  Origin: "https://pdpnigeria.org",
-  Referer: "https://pdpnigeria.org/login",
+  Origin: APP_BASE_URL,
+  Referer: `${APP_BASE_URL}/login`,
   "User-Agent":
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
   "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not)A;Brand";v="99"',
@@ -592,7 +594,7 @@ async function fetchRemoteImageBytes(value) {
   if (/^https?:\/\//i.test(value)) {
     urls.push(value);
   } else if (value.startsWith("/")) {
-    urls.push(`https://api.pdpnigeria.org${value}`, `https://pdpnigeria.org${value}`);
+    urls.push(`${API_BASE_URL}${value}`, `${APP_BASE_URL}${value}`);
   }
   if (urls.length === 0) return null;
 
@@ -603,7 +605,7 @@ async function fetchRemoteImageBytes(value) {
         headers: {
           ...PDP_BROWSER_HEADERS,
           Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-          Referer: "https://pdpnigeria.org/dashboard",
+          Referer: `${APP_BASE_URL}/dashboard`,
           "sec-fetch-dest": "image",
         },
       });
@@ -632,7 +634,7 @@ function embedImageBytes(pdfDoc, bytes, mime) {
 
 async function embedPdpLogo(pdfDoc) {
   if (!pdpLogoBytesPromise) {
-    pdpLogoBytesPromise = fetch("https://pdpnigeria.org/favicon.png")
+    pdpLogoBytesPromise = fetch(`${APP_BASE_URL}/favicon.png`)
       .then((response) => {
         if (!response.ok) throw new Error(`Logo failed with HTTP ${response.status}`);
         return response.arrayBuffer();
