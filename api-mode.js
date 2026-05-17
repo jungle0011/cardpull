@@ -9,8 +9,8 @@ const QRCode = require("qrcode");
 const { Agent } = require("undici");
 const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 
-const API_BASE_URL = "https://api.dev.pdpnigeria.org";
-const APP_BASE_URL = "https://dev.pdpnigeria.org";
+const API_BASE_URL = "https://api.pdpnigeria.org";
+const APP_BASE_URL = "https://pdpnigeria.org";
 const LOGIN_URL = `${API_BASE_URL}/api/auth/login`;
 const ME_URL = `${API_BASE_URL}/api/auth/me`;
 const PDP_BROWSER_HEADERS = {
