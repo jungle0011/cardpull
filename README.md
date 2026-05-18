@@ -60,12 +60,12 @@ zip -r ilorin-east02-output.zip output
 - Ilorin East 04: pending.
 - Ilorin West 001: pending. Continue from row 1185.
 - Ilorin West 003: pending.
-- Ilorin West 004A: duplex generated, ready to send.
+- Ilorin West 004A: sent.
 - Ilorin West 004B: remaining/retry.
 - Ilorin West 005A: sent.
-- Ilorin West 005B: remaining/retry.
+- Ilorin West 005B: sent.
 - Ilorin West 006: sent.
-- Ilorin West 007A: duplex generated, ready to send.
+- Ilorin West 007A: sent.
 - Ilorin West 007B: remaining/retry.
 - Baruten A: sent.
 - Baruten B: sent.

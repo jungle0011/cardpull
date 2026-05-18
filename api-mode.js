@@ -72,7 +72,8 @@ async function main() {
   requestSpacingMs = parseNonNegativeInt(args["request-delay"], 500);
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-  const phones = await readPhones(args.file, { startRow });
+  const phoneData = await readPhones(args.file, { startRow });
+  const phones = phoneData.phones;
   if (phones.length === 0) {
     throw new Error("No valid phone numbers found in the input file.");
   }
@@ -87,14 +88,21 @@ async function main() {
     previouslyFailedSet
   );
   const freshPending = pending.length - previouslyFailedSet.size - retryAvailableSet.size;
+  const unsavedTotal = pending.length;
 
-  console.log(`Loaded ${phones.length} unique phone numbers from ${args.file}`);
-  console.log(`Zone total: ${phones.length}`);
+  console.log(`Loaded ${phoneData.sourceTotal} unique phone numbers from ${args.file}`);
+  console.log(`Zone total: ${phoneData.sourceTotal}`);
+  if (startRow > 1) {
+    console.log(`Skipped before start row: ${phoneData.skippedBeforeStartRow}`);
+  }
+  console.log(`In scope this run: ${phones.length}`);
   console.log(`Already done: ${alreadyDone}`);
-  console.log(`Previously failed: ${previouslyFailedSet.size}`);
-  console.log(`Retry available: ${retryAvailableSet.size}`);
-  console.log(`Fresh pending: ${freshPending}`);
+  console.log(`Unsaved total: ${unsavedTotal}`);
+  console.log(`Previously failed in unsaved: ${previouslyFailedSet.size}`);
+  console.log(`Retry available in unsaved: ${retryAvailableSet.size}`);
+  console.log(`Fresh pending in unsaved: ${freshPending}`);
   console.log(`Queued this run: ${pending.length}`);
+  console.log(`Accounted total: ${alreadyDone + unsavedTotal}`);
   console.log(`Concurrency: ${concurrency}`);
   console.log(`Start row: ${startRow}`);
   console.log(`Request spacing: ${requestSpacingMs}ms`);
@@ -134,13 +142,16 @@ async function main() {
 
   console.log("");
   console.log("API mode complete.");
-  console.log(`Zone total: ${phones.length}`);
+  console.log(`Zone total: ${phoneData.sourceTotal}`);
+  console.log(`In scope this run: ${phones.length}`);
   console.log(`Saved: ${saved}`);
   console.log(`Failed: ${failed}`);
   console.log(`Rate limited, retry on rerun: ${rateLimited}`);
   console.log(`Already done before run: ${alreadyDone}`);
+  console.log(`Unsaved total before run: ${unsavedTotal}`);
   console.log(`Previously failed before run: ${previouslyFailedSet.size}`);
   console.log(`Retry available before run: ${retryAvailableSet.size}`);
+  console.log(`Fresh pending before run: ${freshPending}`);
   console.log(`Output: ${OUTPUT_DIR}`);
 }
 
@@ -223,9 +234,12 @@ async function readPhones(filePath, options = {}) {
   const rows = ext === ".csv" ? await readCsvRows(absolutePath) : readExcelRows(absolutePath);
   const phones = [];
   const seen = new Set();
+  const sourceSeen = new Set();
   const skipped = [];
   const startRow = options.startRow || 1;
   let memberRowNumber = 0;
+  let sourceTotal = 0;
+  let skippedBeforeStartRow = 0;
 
   const phoneColumnIndex = detectPhoneColumnIndex(rows);
 
@@ -237,7 +251,12 @@ async function readPhones(filePath, options = {}) {
       return;
     }
     memberRowNumber += 1;
+    if (!sourceSeen.has(phone)) {
+      sourceSeen.add(phone);
+      sourceTotal += 1;
+    }
     if (memberRowNumber < startRow) {
+      skippedBeforeStartRow += 1;
       return;
     }
     if (!seen.has(phone)) {
@@ -252,7 +271,11 @@ async function readPhones(filePath, options = {}) {
     console.log(`Skipped ${skipped.length} rows. Details: ${SKIPPED_PATH}`);
   }
 
-  return phones;
+  return {
+    phones,
+    sourceTotal,
+    skippedBeforeStartRow,
+  };
 }
 
 async function readCsvRows(filePath) {
