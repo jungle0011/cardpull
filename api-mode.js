@@ -70,6 +70,7 @@ async function main() {
   const concurrency = parsePositiveInt(args.concurrency, 50);
   const startRow = parsePositiveInt(args["start-row"], 1);
   requestSpacingMs = parseNonNegativeInt(args["request-delay"], 500);
+  const retryFailed = Boolean(args["retry-failed"]);
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
   const phoneData = await readPhones(args.file, { startRow });
@@ -89,6 +90,10 @@ async function main() {
   );
   const freshPending = pending.length - previouslyFailedSet.size - retryAvailableSet.size;
   const unsavedTotal = pending.length;
+  const queuePhones = retryFailed
+    ? pending
+    : pending.filter((phone) => !previouslyFailedSet.has(phone));
+  const skippedKnownFailed = retryFailed ? 0 : previouslyFailedSet.size;
 
   console.log(`Loaded ${phoneData.sourceTotal} unique phone numbers from ${args.file}`);
   console.log(`Zone total: ${phoneData.sourceTotal}`);
@@ -101,11 +106,15 @@ async function main() {
   console.log(`Previously failed in unsaved: ${previouslyFailedSet.size}`);
   console.log(`Retry available in unsaved: ${retryAvailableSet.size}`);
   console.log(`Fresh pending in unsaved: ${freshPending}`);
-  console.log(`Queued this run: ${pending.length}`);
+  console.log(`Skipped known failed this run: ${skippedKnownFailed}`);
+  console.log(`Queued this run: ${queuePhones.length}`);
   console.log(`Accounted total: ${alreadyDone + unsavedTotal}`);
   console.log(`Concurrency: ${concurrency}`);
   console.log(`Start row: ${startRow}`);
   console.log(`Request spacing: ${requestSpacingMs}ms`);
+  if (retryFailed) {
+    console.log(`Retry failed mode: on`);
+  }
 
   let completed = 0;
   let saved = 0;
@@ -113,24 +122,24 @@ async function main() {
   let rateLimited = 0;
   const limit = pLimit(concurrency);
 
-  const tasks = pending.map((phone) =>
+  const tasks = queuePhones.map((phone) =>
     limit(async () => {
       try {
         const member = await fetchMember(phone, args.password);
         const outputPath = path.join(OUTPUT_DIR, `${phone}.pdf`);
         await createMemberCardPdf(member, outputPath);
         saved += 1;
-        console.log(`[${completed + 1}/${pending.length}] saved ${phone}.pdf`);
+        console.log(`[${completed + 1}/${queuePhones.length}] saved ${phone}.pdf`);
       } catch (error) {
         const reason = cleanReason(error.message || String(error));
         if (isRateLimitReason(reason)) {
           rateLimited += 1;
           await fsp.appendFile(RATE_LIMITED_PATH, `${new Date().toISOString()}\t${phone}\t${reason}\n`, "utf8");
-          console.log(`[${completed + 1}/${pending.length}] rate-limited ${phone}: rerun will retry`);
+          console.log(`[${completed + 1}/${queuePhones.length}] rate-limited ${phone}: rerun will retry`);
         } else {
           failed += 1;
           await fsp.appendFile(FAILED_PATH, `${new Date().toISOString()}\t${phone}\t${reason}\n`, "utf8");
-          console.log(`[${completed + 1}/${pending.length}] failed ${phone}: ${reason}`);
+          console.log(`[${completed + 1}/${queuePhones.length}] failed ${phone}: ${reason}`);
         }
       } finally {
         completed += 1;
@@ -152,6 +161,8 @@ async function main() {
   console.log(`Previously failed before run: ${previouslyFailedSet.size}`);
   console.log(`Retry available before run: ${retryAvailableSet.size}`);
   console.log(`Fresh pending before run: ${freshPending}`);
+  console.log(`Skipped known failed before run: ${skippedKnownFailed}`);
+  console.log(`Queued this run: ${queuePhones.length}`);
   console.log(`Output: ${OUTPUT_DIR}`);
 }
 
@@ -173,7 +184,7 @@ function parseArgs(argv) {
 }
 
 function printUsage() {
-  console.log('Usage: node api-mode.js --file "zone.xlsx" --password "Pdp@2026" --concurrency 50 --start-row 304');
+  console.log('Usage: node api-mode.js --file "zone.xlsx" --password "Pdp@2026" --concurrency 50 --start-row 304 [--retry-failed]');
 }
 
 function parsePositiveInt(value, fallback) {
