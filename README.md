@@ -46,22 +46,39 @@ zip -r ilorin-east02-output.zip output
 
 - Oyun 01: sent.
 - Oyun 02A: sent.
-- Oyun 02B: duplex generated, ready to send. 49 Oyun 02 phones still not represented in downloaded material.
+- Oyun 02B: sent. Oyun completed and sent.
 - Moro 01: sent.
-- Moro 02A: sent. Moro 02B remaining/retry.
+- Moro 02A: sent.
+- Moro 02B: sent. Moro 02 completed and sent.
 - Ilorin South 02A: sent.
 - Ilorin South 02B: sent.
 - Ilorin East 02A: sent.
 - Ilorin East 02B: sent.
+- Ilorin South 01: sent.
+- Ilorin East 01: in progress / retry-heavy. Was previously parked because of many invalid logins.
+- Ilorin East 04: pending.
+- Ilorin West 004: pending.
+- Ilorin West 005: pending.
+- Ilorin West 006: sent.
+- Ilorin West 007: pending.
 - Baruten A: sent.
 - Baruten B: sent.
 - Isin: sent.
-- Offa 01A: sent. Offa 01B remaining/retry.
-- Ifelodun 01: pending.
-- Ifelodun 02: pending.
-- Kaiama 01A: duplex generated, ready to send. Kaiama 01B remaining/retry.
-- Kaiama 02: running locally on this Mac.
-- Patigi 01A: duplex generated, ready to send. Patigi 01B remaining/retry.
-- Patigi 02: running on sageverselab Codespace.
+- Offa 01: completed and sent.
+- Offa 02A: sent.
+- Offa 02B: sent.
+- Ifelodun 01: sent.
+- Ifelodun 02: sent.
+- Irepodun 01: sent.
+- Irepodun 02A: sent.
+- Irepodun 02B: not planned for now.
+- Kaiama 01A: sent.
+- Kaiama 01B: sent. Kaiama 01 completed and sent.
+- Kaiama 02: sent.
+- Oke-eroA: sent.
+- Oke-eroB: sent.
+- Patigi 01A: sent.
+- Patigi 01B: sent. Patigi 01 completed and sent.
+- Patigi 02: sent.
 
 Uploaded PDF conversion-only work such as ASA1&2, EDU, EKITI, Ilorin East uploaded PDFs, and PDP ID uploaded PDFs are not counted as generated-zone completion.

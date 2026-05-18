@@ -80,10 +80,21 @@ async function main() {
   const existing = new Set(fs.readdirSync(OUTPUT_DIR));
   const pending = phones.filter((phone) => !existing.has(`${phone}.pdf`));
   const alreadyDone = phones.length - pending.length;
+  const pendingSet = new Set(pending);
+  const previouslyFailedSet = intersectSet(readStatusPhones(FAILED_PATH), pendingSet);
+  const retryAvailableSet = subtractSet(
+    intersectSet(readStatusPhones(RATE_LIMITED_PATH), pendingSet),
+    previouslyFailedSet
+  );
+  const freshPending = pending.length - previouslyFailedSet.size - retryAvailableSet.size;
 
   console.log(`Loaded ${phones.length} unique phone numbers from ${args.file}`);
+  console.log(`Zone total: ${phones.length}`);
   console.log(`Already done: ${alreadyDone}`);
-  console.log(`Pending: ${pending.length}`);
+  console.log(`Previously failed: ${previouslyFailedSet.size}`);
+  console.log(`Retry available: ${retryAvailableSet.size}`);
+  console.log(`Fresh pending: ${freshPending}`);
+  console.log(`Queued this run: ${pending.length}`);
   console.log(`Concurrency: ${concurrency}`);
   console.log(`Start row: ${startRow}`);
   console.log(`Request spacing: ${requestSpacingMs}ms`);
@@ -123,10 +134,13 @@ async function main() {
 
   console.log("");
   console.log("API mode complete.");
+  console.log(`Zone total: ${phones.length}`);
   console.log(`Saved: ${saved}`);
   console.log(`Failed: ${failed}`);
   console.log(`Rate limited, retry on rerun: ${rateLimited}`);
-  console.log(`Already done: ${alreadyDone}`);
+  console.log(`Already done before run: ${alreadyDone}`);
+  console.log(`Previously failed before run: ${previouslyFailedSet.size}`);
+  console.log(`Retry available before run: ${retryAvailableSet.size}`);
   console.log(`Output: ${OUTPUT_DIR}`);
 }
 
@@ -159,6 +173,44 @@ function parsePositiveInt(value, fallback) {
 function parseNonNegativeInt(value, fallback) {
   const parsed = Number.parseInt(String(value || ""), 10);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function readStatusPhones(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return new Set();
+  }
+
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  const phones = new Set();
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const parts = line.split("\t");
+    const phone = (parts[1] || "").trim();
+    if (phone) {
+      phones.add(phone);
+    }
+  }
+  return phones;
+}
+
+function intersectSet(source, filter) {
+  const result = new Set();
+  for (const value of source) {
+    if (filter.has(value)) {
+      result.add(value);
+    }
+  }
+  return result;
+}
+
+function subtractSet(source, remove) {
+  const result = new Set();
+  for (const value of source) {
+    if (!remove.has(value)) {
+      result.add(value);
+    }
+  }
+  return result;
 }
 
 async function readPhones(filePath, options = {}) {
