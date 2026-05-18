@@ -100,15 +100,15 @@ async function main() {
   if (startRow > 1) {
     console.log(`Skipped before start row: ${phoneData.skippedBeforeStartRow}`);
   }
-  console.log(`In scope this run: ${phones.length}`);
-  console.log(`Already done: ${alreadyDone}`);
-  console.log(`Unsaved total: ${unsavedTotal}`);
-  console.log(`Previously failed in unsaved: ${previouslyFailedSet.size}`);
-  console.log(`Retry available in unsaved: ${retryAvailableSet.size}`);
-  console.log(`Fresh pending in unsaved: ${freshPending}`);
-  console.log(`Skipped known failed this run: ${skippedKnownFailed}`);
-  console.log(`Queued this run: ${queuePhones.length}`);
-  console.log(`Accounted total: ${alreadyDone + unsavedTotal}`);
+  console.log(`In scope: ${phones.length}`);
+  console.log(`Saved already: ${alreadyDone}`);
+  console.log(
+    `Known failed: ${previouslyFailedSet.size}${retryFailed ? " (included again)" : " (skipped this run)"}`
+  );
+  console.log(`Ready now: ${queuePhones.length}`);
+  console.log(`  - retry candidates: ${retryAvailableSet.size}`);
+  console.log(`  - fresh candidates: ${freshPending}`);
+  console.log(`Scope check: ${alreadyDone} saved + ${queuePhones.length} ready now + ${skippedKnownFailed} known failed = ${phones.length}`);
   console.log(`Concurrency: ${concurrency}`);
   console.log(`Start row: ${startRow}`);
   console.log(`Request spacing: ${requestSpacingMs}ms`);
@@ -152,17 +152,13 @@ async function main() {
   console.log("");
   console.log("API mode complete.");
   console.log(`Zone total: ${phoneData.sourceTotal}`);
-  console.log(`In scope this run: ${phones.length}`);
-  console.log(`Saved: ${saved}`);
-  console.log(`Failed: ${failed}`);
-  console.log(`Rate limited, retry on rerun: ${rateLimited}`);
-  console.log(`Already done before run: ${alreadyDone}`);
-  console.log(`Unsaved total before run: ${unsavedTotal}`);
-  console.log(`Previously failed before run: ${previouslyFailedSet.size}`);
-  console.log(`Retry available before run: ${retryAvailableSet.size}`);
-  console.log(`Fresh pending before run: ${freshPending}`);
-  console.log(`Skipped known failed before run: ${skippedKnownFailed}`);
-  console.log(`Queued this run: ${queuePhones.length}`);
+  console.log(`In scope: ${phones.length}`);
+  console.log(`Saved this run: ${saved}`);
+  console.log(`Failed this run: ${failed}`);
+  console.log(`Retry later: ${rateLimited}`);
+  console.log(`Saved already before run: ${alreadyDone}`);
+  console.log(`Known failed before run: ${previouslyFailedSet.size}`);
+  console.log(`Ready at start: ${queuePhones.length}`);
   console.log(`Output: ${OUTPUT_DIR}`);
 }
 
